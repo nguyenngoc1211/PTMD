@@ -1,0 +1,13 @@
+.venv/
+RLibrary/
+__pycache__/
+*.pyc
+.Rhistory
+.RData
+.cache/
+.agents/
+.codex/
+results/
+report/
+BAO_CAO_NHOM.md
+/Obfuscated-MalMem2022.csv

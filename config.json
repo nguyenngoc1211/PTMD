@@ -1,0 +1,13 @@
+{
+  "seed": 42,
+  "data": "data/Obfuscated-MalMem2022.csv",
+  "test_size": 0.2,
+  "arf_train_samples": 3000,
+  "importance_test_samples": 1500,
+  "conditional_repeats": 5,
+  "permutation_repeats": 30,
+  "arf_num_trees": 20,
+  "arf_min_node_size": 20,
+  "threads": 4,
+  "alpha": 0.05
+}
