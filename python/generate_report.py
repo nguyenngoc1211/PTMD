@@ -38,11 +38,17 @@ def main():
                      for name in ['numpy','pandas','scipy','scikit-learn','xgboost','matplotlib','seaborn','joblib']},
                      r=metadata['r_version'],arf=metadata['arf_version'])
     files=list(Path('python').glob('*.py'))+list(Path('r').glob('*.R'))+[Path('config.json'),Path('run_all.sh')]
+    files += [p for p in (Path('dataset_manifest.json'), Path('provenance.json')) if p.exists()]
     manifest=dict(config=CONFIG,dataset_sha256=profile['sha256'],environment=environment,
                   source_sha256={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)})
     Path('results/intermediate/run_manifest.json').write_text(json.dumps(manifest,indent=2))
     main_diag=diagnostics[diagnostics.conditioning_set.eq('All other features')]
-    arf_accuracy = ', '.join(f'{v:.2%}' for v in metadata.get('discriminator_accuracy', []))
+    arf_accuracies = metadata.get('discriminator_accuracy', [])
+    if isinstance(arf_accuracies, (int, float)):
+        arf_accuracies = [arf_accuracies]  # jsonlite auto-unboxes a single ARF iteration.
+    arf_accuracy = ', '.join(f'{v:.2%}' for v in arf_accuracies)
+    dataset_description = CONFIG.get('dataset_description',
+        'CIC-MalMem-2022 — https://www.unb.ca/cic/datasets/malmem-2022.html')
     text=f'''# Phân tích mức độ quan trọng có điều kiện của đặc trưng mã độc trên RAM
 
 Báo cáo được sinh từ kết quả hiện tại bởi `python/generate_report.py`. Các bảng, hình và cấu hình thuộc cùng pipeline. Đây là nghiên cứu thực nghiệm trên benchmark; không phải hệ thống triển khai phát hiện mã độc ngoài thực tế.
@@ -55,7 +61,7 @@ Phương pháp chính là lấy mẫu có điều kiện bằng Adversarial Rand
 
 ## 2. Dữ liệu và chống rò rỉ
 
-Dữ liệu gốc là [CIC-MalMem-2022 của Canadian Institute for Cybersecurity](https://www.unb.ca/cic/datasets/malmem-2022.html). Thí nghiệm dùng file CSV có sẵn trong project; fingerprint SHA-256 bên dưới xác định chính xác đầu vào.
+Dữ liệu: {dataset_description}. Thí nghiệm dùng CSV tại `{profile['path']}`; fingerprint SHA-256 bên dưới xác định chính xác đầu vào đã chuẩn hóa. Nếu chạy qua `run_dataset_experiments.py`, xem `provenance.json` để truy vết SHA-256 CSV nguồn và ánh xạ nhãn.
 
 | Thuộc tính | Giá trị |
 | --- | --- |
@@ -114,7 +120,7 @@ Các chỉ số test_position là zero-based; replicate là 1..{metadata['repeat
 
 ### 4.3 Suy luận thống kê
 
-SE = SD(d_i)/sqrt(n). Kiểm định t một phía xét H0: E[d_i] ≤ 0, H1: E[d_i] > 0. `ci_lo` là cận dưới tin cậy một phía 95%, không phải khoảng hai phía. Điều chỉnh Benjamini–Hochberg trên 55 giả thuyết CFI; case studies điều chỉnh riêng trên 21 cấu hình. `q_value < {CONFIG['alpha']}` là quy tắc báo cáo tín hiệu dương sau điều chỉnh.
+SE = SD(d_i)/sqrt(n). Kiểm định t một phía xét H0: E[d_i] ≤ 0, H1: E[d_i] > 0. `ci_lo` là cận dưới tin cậy một phía {(1-CONFIG['alpha'])*100:g}%, không phải khoảng hai phía. Điều chỉnh Benjamini–Hochberg trên {len(cfi)} giả thuyết CFI; case studies điều chỉnh riêng trên {len(cases)} cấu hình. `q_value < {CONFIG['alpha']}` là quy tắc báo cáo tín hiệu dương sau điều chỉnh.
 
 SE mô tả biến động giữa các hàng sau trung bình replicate; không bao gồm toàn bộ bất định do huấn luyện lại XGBoost/ARF. Kết quả kiểm định là thăm dò, phụ thuộc giả định về các hàng và chất lượng phân phối có điều kiện. Loss có thể lệch mạnh trên mô hình gần hoàn hảo; p-value nhỏ không thay thế đánh giá độ lớn hiệu ứng.
 
@@ -146,7 +152,7 @@ Ba feature có ước lượng CFI cao nhất: {', '.join('`'+f+'`' for f in top
 
 ## 6. Tương quan và nhóm forensic
 
-Có {len(pairs)} cặp trong toàn bộ 55 feature thỏa |Spearman ρ| ≥ 0.8 trên test. Các cột hằng số có tương quan không xác định và không được đưa vào danh sách cặp.
+Có {len(pairs)} cặp trong toàn bộ {len(cfi)} feature thỏa |Spearman ρ| ≥ 0.8 trên test. Các cột hằng số có tương quan không xác định và không được đưa vào danh sách cặp.
 
 {table(pairs.head(12))}
 
@@ -160,7 +166,7 @@ Các nhóm như svcscan, handles và malfind cung cấp cách tổ chức đặc
 
 ## 7. Conditioning case studies
 
-Bảy feature được định trước trong mã nguồn, mỗi feature xét ba tập điều kiện: tất cả feature khác, cùng nhóm forensic, và các nhóm forensic khác. Trong mỗi feature, ba phép đo dùng giao của các hàng hợp lệ để giữ cùng tập đánh giá. Trường hợp “all” tái sử dụng chính mẫu của CFI chính, không sinh lại một bộ mẫu ngẫu nhiên khác.
+{cases.feature.nunique()} feature được định trước trong cấu hình hoặc mã nguồn, mỗi feature xét ba tập điều kiện: tất cả feature khác, cùng nhóm theo tiền tố tên cột trước dấu chấm, và các nhóm khác. Nhóm chỉ có ý nghĩa forensic nếu schema dữ liệu định nghĩa như vậy. Trong mỗi feature, ba phép đo dùng giao của các hàng hợp lệ để giữ cùng tập đánh giá. Trường hợp “all” tái sử dụng chính mẫu của CFI chính, không sinh lại một bộ mẫu ngẫu nhiên khác.
 
 {table(cases[['feature','conditioning_set','importance','se','q_value','n_valid','coverage']])}
 

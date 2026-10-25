@@ -1,0 +1,9 @@
+{
+  "dataset_id": "new_memory_dataset",
+  "source": "REPLACE: official dataset URL, version and citation",
+  "collection_context": "REPLACE: collection period, OS, extraction tool, sample unit and independence from MalMem2022",
+  "label_column": "label",
+  "label_map": {"0": "Benign", "1": "Malware"},
+  "feature_columns": ["memory.process_count", "memory.handle_count", "memory.module_count"],
+  "case_features": ["memory.process_count", "memory.handle_count"]
+}

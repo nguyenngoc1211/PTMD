@@ -91,6 +91,9 @@ fwrite(result,'results/intermediate/X_cond_resampled.csv')
 # Fixed questions, not selected by test CFI significance.
 top <- c('svcscan.nservices','svcscan.process_services','handles.avg_handles_per_proc',
          'handles.nthread','callbacks.ncallbacks','malfind.commitCharge','pslist.avg_threads')
+if (!is.null(cfg$case_features)) top <- unlist(cfg$case_features, use.names=FALSE)
+if (!length(top) || length(top) > 7L || anyDuplicated(top) || !all(top %in% features))
+  stop('case_features must contain 1 to 7 distinct input features')
 cases <- result[,c('test_position','replicate')]
 for (j in seq_along(top)) {
   feature <- top[j]

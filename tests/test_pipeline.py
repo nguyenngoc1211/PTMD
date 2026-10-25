@@ -9,9 +9,22 @@ from scipy.stats import ttest_1samp
 from common import logloss_rows,inference,adjust_bh
 from preprocess import prepare
 from compute_cfi import aligned_values
+from run_family_experiments import select_family
 
 
 class PipelineTests(unittest.TestCase):
+    def test_family_selection_excludes_other_malware_and_preserves_source_ids(self):
+        df = pd.DataFrame({'Class': ['Benign', 'Malware', 'Malware', 'Malware'],
+                           'Category': ['Benign', 'Ransomware-Conti-x', 'Spyware-Gator-x', 'Trojan-Zeus-x'],
+                           'a': [1, 2, 3, 4]}, index=[10, 20, 30, 40])
+        for family, row in [('Ransomware', 20), ('Spyware', 30), ('Trojan', 40)]:
+            result = select_family(df, family)
+            self.assertEqual(result.index.tolist(), [10, row])
+        with self.assertRaises(ValueError):
+            select_family(df, 'Unknown')
+        with self.assertRaises(ValueError):
+            select_family(df.iloc[[0]], 'Trojan')
+
     def test_float32_probabilities_are_clipped_in_float64(self):
         loss=logloss_rows([0,1],np.array([1,0],dtype=np.float32))
         self.assertTrue(np.isfinite(loss).all())

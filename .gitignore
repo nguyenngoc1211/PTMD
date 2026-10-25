@@ -11,3 +11,13 @@ results/
 report/
 BAO_CAO_NHOM.md
 /Obfuscated-MalMem2022.csv
+data/*
+!data/README.md
+!data/manifests/
+data/manifests/*
+!data/manifests/*.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key

@@ -91,7 +91,8 @@ def main():
         ax.bar(range(3),frame.importance,yerr=frame.se,color=['#4878a8','#d87754','#60a26e'])
         ax.set_xticks(range(3),['All','Same group','Other groups'],rotation=20)
         ax.set_title(feature,fontsize=9); ax.set_ylabel('Log-loss increase (SE)')
-    axes.flat[-1].axis('off')
+    for ax in list(axes.flat)[cases.feature.nunique():]:
+        ax.axis('off')
     save(fig,'08_conditioning_sets')
     summary=merged.groupby('forensic_group').agg(n_features=('feature','size'),
             max_cfi=('conditional_importance','max'),mean_cfi=('conditional_importance','mean'),

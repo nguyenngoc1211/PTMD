@@ -67,6 +67,8 @@ def main():
     check(all((ROOT/'report'/link).is_file() for link in links),'All report figures exist')
     manifest=json.loads(Path('results/intermediate/run_manifest.json').read_text())
     check(manifest['config']==CONFIG,'Report manifest uses current configuration')
+    dataset_digest=hashlib.sha256((ROOT/CONFIG['data']).read_bytes()).hexdigest()
+    check(manifest['dataset_sha256']==dataset_digest,'Dataset fingerprint agrees with run manifest')
     check(all(hashlib.sha256(Path(p).read_bytes()).hexdigest()==digest for p,digest in manifest['source_sha256'].items()),'Source fingerprints agree with run manifest')
     receipt=dict(status='passed',checks=checks,n_checks=len(checks),
                  coverage_min=float(cfi.coverage.min()),coverage_max=float(cfi.coverage.max()),

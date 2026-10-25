@@ -2,7 +2,167 @@
 
 Project nghiên cứu feature importance trên `Obfuscated-MalMem2022.csv`: huấn luyện XGBoost, tính marginal importance, lấy mẫu có điều kiện bằng ARF, tính CPI và sinh báo cáo tiếng Việt.
 
-**Báo cáo kết quả:** [report/research_results.md](report/research_results.md).
+## Thành viên mới: bắt đầu ở đây
+
+- [Hướng dẫn cài đặt, tái lập và chạy dataset mới](docs/REPRODUCIBILITY_VI.md): lệnh từng bước, cấu hình nhãn/cột, chạy thử, chạy 3 seed và đọc kết quả.
+- [Đưa dự án lên GitHub và bàn giao cho nhóm](docs/GITHUB_HANDOFF_VI.md).
+- [Mẫu biên bản kết quả cần gửi lại](docs/EXPERIMENT_RESULT_TEMPLATE.md).
+- [Lấy dữ liệu và kiểm tra SHA-256](data/README.md).
+
+Luồng bàn giao mới dùng `python/run_dataset_experiments.py`: mỗi seed có thư mục riêng,
+không ghi đè pipeline gốc. Hỗ trợ CSV đặc trưng **số**, phân loại **Benign/Malware**,
+với danh sách feature và ánh xạ nhãn khai báo rõ trong manifest. Không cần chạy file malware.
+Dataset khác schema được huấn luyện một mô hình riêng; đây là lặp phương pháp trên
+dataset mới, chưa phải đem mô hình MalMem đi dự đoán trực tiếp dữ liệu bên ngoài.
+
+```bash
+# Sau khi cài môi trường và lấy dữ liệu theo hướng dẫn:
+.venv/bin/python python/run_dataset_experiments.py \
+  --data data/Obfuscated-MalMem2022.csv \
+  --manifest data/manifests/malmem2022.json \
+  --output results/reproduction/malmem2022-full --seeds 42,43,44
+```
+
+CSV, `results/`, `report/` và thư viện cài tại máy không đưa vào Git. Các liên kết
+báo cáo/kết quả lịch sử bên dưới chỉ hoạt động khi có artifact tương ứng tại máy;
+clone mới cần chạy thí nghiệm hoặc nhận gói kết quả từ nhóm. GitHub Actions chỉ chạy
+kiểm thử Python, không chạy các thí nghiệm R/ARF đầy đủ.
+
+**Báo cáo chính thức (bản duy nhất để nộp):** [report/bao_cao_tong_hop/Bao_cao_nghien_cuu_XAI_bo_nho_ma_doc.pdf](report/bao_cao_tong_hop/Bao_cao_nghien_cuu_XAI_bo_nho_ma_doc.pdf) — 22 trang, cập nhật 18/10/2026. Kịch bản nói 3–4 phút: [report/KICH_BAN_BAO_CAO_3_PHUT.md](report/KICH_BAN_BAO_CAO_3_PHUT.md). Các báo cáo rời là nguyên liệu truy vết; xem [report/README.md](report/README.md).
+
+## Thí nghiệm riêng từng nhóm malware với benign
+
+```bash
+.venv/bin/python python/run_family_experiments.py
+```
+
+Chạy đầy đủ XGBoost, MFI F1/log-loss, CFI/cARFi và kiểm chứng riêng cho
+Ransomware + Benign, Spyware + Benign, Trojan + Benign. Đây là ba nhóm cấp cao
+theo `Category`, chưa tách 15 family con. Giữ nguyên cấu hình thí nghiệm gốc
+và toàn bộ benign, loại trùng trước khi chia tập trong từng bài toán.
+
+Kết quả ở `results/family_experiments/{ransomware,spyware,trojan}/`, gồm bản chụp
+mã nguồn/cấu hình, dữ liệu đã lọc, chỉ số dòng nguồn, model, bảng, hình và log.
+Pipeline tổng ban đầu vẫn được giữ riêng. Chạy lại lệnh sẽ cập nhật các thí nghiệm này.
+
+- [Báo cáo so sánh và kết luận](report/family_results.md)
+- [Bốn báo cáo cột mốc: dữ liệu, mô hình, importance, kiểm chứng](report/family_milestones/README.md)
+- [Metrics ba mô hình](results/family_experiments/metrics_summary.csv)
+- [Toàn bộ importance của 55 feature × 3 nhóm](results/family_experiments/feature_importance_all.csv)
+- [Hình top-10 CFI](results/family_experiments/cfi_top10_comparison.png)
+
+Để tổng hợp lại các lần chạy đã hoàn tất: `.venv/bin/python python/run_family_experiments.py --summary-only`.
+Nếu bị ngắt, chạy `.venv/bin/python python/run_family_experiments.py --resume` để kiểm chứng
+và dùng lại các nhóm đã hoàn tất, chạy lại nhóm còn thiếu.
+
+## Kiểm tra tổng quát hóa theo family chưa thấy (leave-one-family-out)
+
+```bash
+.venv/bin/python python/run_generalization.py --seeds 42,43,44 --cv-folds 3
+```
+
+Với từng family malware trong 15 family con (Ransomware/Spyware/Trojan), giữ trọn
+family đó làm test cộng phần benign test, huấn luyện bằng 14 family còn lại cộng
+phần benign train. Family bị giữ không tham gia huấn luyện, chọn feature hay ngưỡng.
+Thí nghiệm so hai bộ feature trên cùng fold: `baseline` (55 feature gốc) và
+`engineered` (thêm tỉ lệ theo số tiến trình `ratio.*` và tổng/trung bình theo nhóm
+forensic `group.*`). Lặp nhiều seed để đo biến động; `--cv-folds` chạy stratified
+k-fold bên trong tập train để tách độ ổn định của mô hình khỏi vấn đề họ chưa thấy.
+Đối chứng là chia stratified ngẫu nhiên như pipeline chính.
+
+Kết quả ở `results/generalization/`; báo cáo ở
+[report/generalization_results.md](report/generalization_results.md). Module này độc
+lập với pipeline đã kiểm chứng và không sửa `config.json`. Dựng lại báo cáo/hình từ
+bảng đã lưu mà không huấn luyện lại bằng `--report-only`.
+
+Kết quả hiện tại (3 seed, CV 3-fold): F1 leave-one-family-out ≈ **0.9988** so với
+**0.9999** khi chia ngẫu nhiên; sai số tập trung ở `Transponder` (~0.987) và
+`Reconyc` (~0.996). Bộ feature engineered **không** cải thiện thực chất (ΔF1 ≈ +1e-5).
+
+## Đối chiếu phương pháp với benchmark độc lập
+
+```bash
+.venv/bin/python python/cross_check_benchmark.py
+```
+
+Module này không huấn luyện lại model: nó đọc các bảng đã sinh của pipeline cộng
+bản sao nhỏ của hai benchmark công khai dùng cùng CIC-MalMem-2022 (gói leakage-audit
+trên Zenodo 22726771 và OACSP-Forensics trên Zenodo 21435602), rồi đối chiếu các
+đại lượng so sánh được: số nhóm vector sau loại trùng, mức bão hoà nhị phân, độ khó
+ở mức family và thứ hạng feature. Bản sao artifact nằm ở `results/external_benchmarks/`.
+
+Báo cáo ở [report/methodology_cross_check.md](report/methodology_cross_check.md).
+Kết quả: số nhóm vector duy nhất khớp tuyệt đối (58,027), độ chính xác nhị phân khớp
+đến ~1e-6, và 5/5 (top-5) feature quan trọng nhất trùng với xếp hạng gain của OACSP.
+
+## Phân loại đa lớp family (cải thiện thuật toán)
+
+```bash
+.venv/bin/python python/run_multiclass_family.py --seeds 42,43,44
+```
+
+Phát hiện nhị phân đã bão hoà (F1 1.0 khi chia ngẫu nhiên, 0.9988 khi
+leave-one-family-out), nên thí nghiệm này nhắm vào bài toán chưa bão hoà: gán nhãn
+family. Hai mục tiêu song song: **16 lớp** (Benign + 15 family, macro-F1 là metric
+chính) và **4 lớp** (Benign + Ransomware/Spyware/Trojan, để so trực tiếp với mốc
+accuracy 0.878 của OACSP-Forensics). So sánh XGBoost, HistGradientBoosting,
+RandomForest, ExtraTrees, LogisticRegression và một mô hình phân cấp type→family,
+lặp nhiều seed trên giao thức chia stratified đã loại trùng vector. Các nhóm vector
+trùng nhau nhưng khác family bị loại bỏ thay vì gán nhãn tuỳ tiện.
+
+Kết quả cuối (3 seed 42/43/44, kèm biến thể cân bằng lớp):
+
+- **16 lớp:** XGBoost tốt nhất, macro-F1 **0.5528 ± 0.0054** (accuracy 0.7633 ±
+  0.0027); kế tiếp RandomForest 0.5439, HistGradientBoosting 0.5409, mô hình phân
+  cấp 0.5359, ExtraTrees 0.5147; LogisticRegression chỉ 0.2945.
+- **4 lớp:** XGBoost accuracy **0.8763 ± 0.0028**, macro-F1 0.8126 ± 0.0042 — sát
+  mốc OACSP-Forensics 0.8783, xác nhận độ khó nằm ở mức family chứ không phải type.
+- Toàn bộ sai số nằm trong nội bộ từng nhóm: **0** nhầm Benign↔malware. Các cặp
+  nhầm nhiều nhất là `Transponder`→`CWS`, `CWS`→`Transponder`, `Transponder`→`Gator`.
+- Cân bằng lớp giúp XGBoost tăng nhẹ (macro-F1 0.5467 → 0.5528).
+
+Kết quả ở `results/family_multiclass/`; báo cáo ở
+[report/family_multiclass.md](report/family_multiclass.md). Module độc lập với
+pipeline đã kiểm chứng và không sửa `config.json`. Dựng lại báo cáo/hình từ bảng đã
+lưu bằng `--report-only`; chạy thêm biến thể cân bằng lớp bằng `--balanced`.
+
+## Conditional feature importance cho bài toán family (xAI)
+
+```bash
+.venv/bin/python python/cfi_family.py
+```
+
+CFI hiện có chỉ ở dạng nhị phân "type vs Benign", và cả ba nhóm đều lấy `svcscan` làm
+feature đứng đầu nên không đặc thù. Module này tái dùng **nguyên** bộ lấy mẫu có điều
+kiện ARF của pipeline đã kiểm chứng, chỉ thay log-loss nhị phân bằng **multiclass
+log-loss** để CFI xác định được cho mọi số lớp, rồi chạy ba bài toán trong đó hai bài
+toán bỏ hẳn Benign:
+
+- `malware3`: Ransomware / Spyware / Trojan, không có Benign.
+- `family15`: 15 họ malware, không có Benign.
+- `type4`: Benign + ba nhóm, dùng làm đối chứng.
+
+Kết quả (seed 42, 3.000 dòng ARF, 1.500 dòng test, 5 draws, BH trên 55 feature,
+coverage 1.0):
+
+- **`svcscan` là bộ phân biệt benign-vs-malware, không phải đặc trưng family.** Vị trí
+  tốt nhất của nhóm `svcscan` là hạng **1** ở `type4` (có Benign), nhưng tụt xuống
+  hạng **14** ở `malware3` và hạng **10** ở `family15`.
+- Khi bỏ Benign, thứ hạng dẫn đầu chuyển sang nhóm `handles`, `malfind` và
+  `ldrmodules` ở cả hai mức phân giải (3 nhóm và 15 họ).
+- Feature lặp lại ở nhiều bài toán: `handles.nsemaphore`, `handles.nkey`,
+  `malfind.commitCharge`, `handles.nfile`; kế đó là `handles.nsection`,
+  `malfind.uniqueInjections`, `ldrmodules.not_in_load_avg`, `dlllist.avg_dlls_per_proc`,
+  `callbacks.ncallbacks`.
+- Số feature có q < 0.05: **31/55** ở `malware3` và **35/55** ở `family15`.
+- Hướng tác động: `handles.nfile` giảm dần theo Ransomware > Spyware > Trojan
+  (842 / 763 / 646); `malfind.commitCharge` cao vượt trội ở Spyware (2394).
+
+Mỗi bài toán chạy trong thư mục riêng `results/cfi_family/<task>/` (bản sao
+`config.json` + `conditional_sampling.R` + symlink `RLibrary`), không sửa file nào của
+pipeline đã kiểm chứng. Kết quả ở `results/cfi_family/`; báo cáo ở
+[report/cfi_family.md](report/cfi_family.md). Dựng lại báo cáo bằng `--report-only`;
+giảm chi phí khi thử bằng `--arf-train`, `--test-samples`, `--repeats`.
 
 ## Chạy trong môi trường hiện tại
 
@@ -73,6 +233,9 @@ Rscript r/conditional_sampling.R
 | `python/analyze_results.py` | So sánh, tương quan, case studies và hình |
 | `python/generate_report.py` | Sinh báo cáo và manifest mã nguồn |
 | `python/verify_results.py` | Xác minh split, mô hình, CFI và báo cáo |
+| `python/run_generalization.py` | Leave-one-family-out, feature engineered, nhiều seed/CV |
+| `python/cross_check_benchmark.py` | Đối chiếu phương pháp với benchmark độc lập (chỉ đọc) |
+| `python/run_multiclass_family.py` | Phân loại đa lớp family (16 lớp + 4 lớp), nhiều model |
 | `tests/` | Kiểm thử hồi quy |
 | `results/models/` | XGBoost và ARF/FORDE |
 | `results/intermediate/` | Split, draws, loss differences, manifest và verification |
