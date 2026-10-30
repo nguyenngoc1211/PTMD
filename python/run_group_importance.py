@@ -220,6 +220,13 @@ def run(args):
     permutation_rows, permutation_runs, shapley_rows = [], [], []
     checks = []
 
+    if args.reuse_runs:
+        path = OUT / 'permutation_runs.csv'
+        if not path.exists():
+            raise SystemExit(f'--reuse-runs: {path} does not exist')
+        permutation_runs.append(pd.read_csv(path))
+        tasks = {}
+
     for task_name, task in tasks.items():
         groups = group_map(task.features)
         for seed in args.seeds:
@@ -273,8 +280,9 @@ def run(args):
         runs.to_csv(OUT / 'permutation_runs.csv', index=False)
         summary = summarise_permutation(runs)
         summary.to_csv(OUT / 'permutation_summary.csv', index=False)
-        pd.DataFrame(permutation_rows).to_csv(OUT / 'permutation_group_means.csv',
-                                              index=False)
+        if permutation_rows:
+            pd.DataFrame(permutation_rows).to_csv(OUT / 'permutation_group_means.csv',
+                                                  index=False)
         figures_permutation(summary)
     if shapley_rows:
         shapley_table = pd.concat(shapley_rows, ignore_index=True)
@@ -291,23 +299,29 @@ def run(args):
 
 
 def summarise_permutation(runs):
+    """Same-width null: a group is compared with controls of its own width.
+
+    Pooling controls across groups mixes block widths (a 13-column block and a
+    1-column block), which inflates p for wide groups and deflates it for narrow
+    ones. Controls are matched by group before the empirical p is computed.
+    """
     rows = []
-    for (task, model), block in runs.groupby(['task', 'model']):
+    for (task, model, group), block in runs.groupby(['task', 'model', 'group']):
+        observed = block[block.condition == 'permute_group']
         null = block[block.condition == 'permute_random']
-        for group, observed in block[block.condition == 'permute_group'].groupby('group'):
-            values = null.delta_log_loss.to_numpy()
-            effect = float(observed.delta_log_loss.mean())
-            rows.append(dict(
-                task=task, model=model, group=group,
-                n_seeds=int(observed.seed.nunique()),
-                delta_log_loss_mean=effect,
-                delta_log_loss_sd=float(observed.delta_log_loss.std(ddof=1))
-                if len(observed) > 1 else float('nan'),
-                null_mean=float(values.mean()) if len(values) else np.nan,
-                null_sd=float(values.std(ddof=1)) if len(values) > 1 else np.nan,
-                p_empirical=float((np.sum(values >= effect) + 1) / (len(values) + 1))
-                if len(values) else np.nan,
-            ))
+        values = null.delta_log_loss.to_numpy()
+        effect = float(observed.delta_log_loss.mean())
+        rows.append(dict(
+            task=task, model=model, group=group,
+            n_seeds=int(observed.seed.nunique()),
+            delta_log_loss_mean=effect,
+            delta_log_loss_sd=float(observed.delta_log_loss.std(ddof=1))
+            if len(observed) > 1 else float('nan'),
+            null_mean=float(values.mean()) if len(values) else np.nan,
+            null_sd=float(values.std(ddof=1)) if len(values) > 1 else np.nan,
+            p_empirical=float((np.sum(values >= effect) + 1) / (len(values) + 1))
+            if len(values) else np.nan,
+        ))
     summary = pd.DataFrame(rows)
     summary['rank'] = (summary.groupby(['task', 'model'])['delta_log_loss_mean']
                        .rank(ascending=False, method='min').astype(int))
@@ -471,6 +485,7 @@ def write_manifest(args):
         ablation_name=args.ablation_name,
         permutation_repeats=args.permutation_repeats,
         permutation_controls=args.controls,
+        reused_runs=bool(args.reuse_runs),
         shapley_models=args.shapley_models,
         shapley_explain=args.shapley_explain,
         shapley_background=args.shapley_background,
@@ -499,6 +514,9 @@ def main():
     parser.add_argument('--ablation-name', default='ablation',
                         help='ablation results directory used for cross-method '
                              'rankings (e.g. ablation_v2)')
+    parser.add_argument('--reuse-runs', action='store_true',
+                        help='recompute summary/report from existing '
+                             'permutation_runs.csv without refitting or permuting')
     args = parser.parse_args()
     global OUT
     OUT = ROOT / 'results' / 'group_experiments' / args.out_name
