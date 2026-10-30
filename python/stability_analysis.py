@@ -256,7 +256,7 @@ def write_report(summary, features, groups, raw, args):
                        'hạng TB', 'SD hạng', 'CI 2.5%', 'CI 97.5%']
     lines.append(table_text(display.round(4)) + '\n')
     for task in groups.task.unique():
-        lines.append(f'![Hạng nhóm {task}](../results/stability/{args.out_name}/figures/'
+        lines.append(f'![Hạng nhóm {task}](results/stability/{args.out_name}/figures/'
                      f'group_rank_stability_{task}.png)\n')
     lines.append('## 4. Cách đọc\n')
     lines.append('- Nguồn `permutation` là sàn nhiễu: nếu đồng thuận giữa các nguồn khác '
@@ -265,7 +265,7 @@ def write_report(summary, features, groups, raw, args):
                  'các lần hoán vị trong cùng run không được coi là quan sát độc lập.')
     lines.append('- Ổn định hạng không đồng nghĩa với đúng nhân quả; đây là kiểm tra độ '
                  'lặp lại của giải thích, không phải kiểm định ý nghĩa.\n')
-    (ROOT / 'report' / 'STABILITY_REPORT.md').write_text('\n'.join(lines))
+    (ROOT / 'STABILITY_REPORT.md').write_text('\n'.join(lines))
 
 
 def table_text(frame):
