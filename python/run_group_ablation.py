@@ -59,6 +59,7 @@ import matplotlib.pyplot as plt
 
 from common import CONFIG, ROOT
 from generate_report import table as table_text
+from split_manager import STRATEGIES
 from group_protocol import (GROUPS, MODELS, TASKS, degradation, group_map,
                             load_tasks, make_model, random_feature_sets,
                             rank_values, score)
@@ -66,6 +67,15 @@ from group_protocol import (GROUPS, MODELS, TASKS, degradation, group_map,
 OUT = ROOT / 'results' / 'group_experiments' / 'ablation'
 METRICS = ['log_loss', 'accuracy', 'f1', 'macro_f1', 'roc_auc', 'pr_auc',
            'balanced_accuracy']
+# Below this full-model log-loss the task has no headroom for ablation deltas.
+# Measured baseline on the old leaky random split was 7.0e-05.
+SATURATION_LOG_LOSS = 1e-3
+
+
+def set_out(name):
+    """Point every writer at a versioned results directory."""
+    global OUT
+    OUT = ROOT / 'results' / 'group_experiments' / name
 
 
 def fit_score(task, X_all, train, test, columns, model_name, seed):
@@ -96,7 +106,23 @@ def group_correlation(task):
     return pd.DataFrame(rows).sort_values('mean_abs_spearman', ascending=False)
 
 
+def blocks(task_name, correlation, args):
+    """Correlated group pairs to ablate jointly (substitution test).
+
+    Two groups that each look redundant alone may still be jointly necessary,
+    because each substitutes for the other. Dropping the pair breaks the
+    substitution and exposes the shared information. The pairs are the
+    highest-mean |Spearman| cross-group links, ranked before any result is
+    seen, so the selection cannot chase a favourable delta.
+    """
+    if not args.blocks:
+        return []
+    table = correlation[task_name].head(args.blocks)
+    return [(row.group_a, row.group_b) for row in table.itertuples()]
+
+
 def run(args):
+    split = getattr(args, 'split', 'random')
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / 'figures').mkdir(exist_ok=True)
     tasks = load_tasks(args.tasks)
@@ -117,7 +143,7 @@ def run(args):
             pairs = correlation[task_name].iloc[0:0]
 
         for seed in args.seeds:
-            train, test = task.split(seed)
+            train, test = task.split(seed, strategy=split)
             for model_name in args.models:
                 full_cols = list(task.features)
                 full, seconds = fit_score(task, X_all, train, test, full_cols,
@@ -155,6 +181,20 @@ def run(args):
                                          n_features=len(kept),
                                          fit_seconds=seconds, **metrics))
 
+                for group_a, group_b in blocks(task_name, correlation, args):
+                    kept = [f for f in task.features
+                            if f.split('.')[0] not in (group_a, group_b)]
+                    metrics, seconds = fit_score(task, X_all, train, test, kept,
+                                                 model_name, seed)
+                    runs.append(dict(task=task_name, model=model_name, seed=seed,
+                                     condition='drop_block',
+                                     group=f'{group_a}+{group_b}', control_index=-1,
+                                     n_features=len(kept), fit_seconds=seconds,
+                                     **metrics))
+                    print(f'  drop BLOCK {group_a}+{group_b:<10} '
+                          f'{primary_metric(task)}={metrics[primary_metric(task)]:.5f}',
+                          flush=True)
+
                 for row in pairs.itertuples():
                     partner = row.group_b
                     alone = task.complement_of(partner)
@@ -173,19 +213,54 @@ def run(args):
                 print(f'[{task_name}/{model_name}/seed {seed}] done', flush=True)
 
     runs = pd.DataFrame(runs)
+    runs['split'] = split
     runs.to_csv(OUT / 'runs.csv', index=False)
     deltas = build_deltas(runs)
     deltas.to_csv(OUT / 'deltas.csv', index=False)
+    recall_deltas(runs).to_csv(OUT / 'per_class_recall_deltas.csv', index=False)
     summary, rankings = summarise(deltas, args)
     summary.to_csv(OUT / 'summary.csv', index=False)
     rankings.to_csv(OUT / 'rankings.csv', index=False)
+    block_table = summarise_blocks(deltas, summary)
+    if len(block_table):
+        block_table.to_csv(OUT / 'blocks.csv', index=False)
     if substitutions:
         pd.DataFrame(substitutions).to_csv(OUT / 'substitution.csv', index=False)
     figures(summary, deltas, tasks)
-    write_report(summary, rankings, deltas, correlation, tasks, args)
+    write_report(summary, rankings, deltas, correlation, tasks, args, block_table)
     write_manifest(args)
     print(summary.to_string(index=False), flush=True)
     print(f'Ablation artifacts written to {OUT.relative_to(ROOT)}', flush=True)
+
+
+def summarise_blocks(deltas, summary):
+    """Pairwise block ablation versus the sum of its single-group drops.
+
+    If dropping A alone costs little and dropping B alone costs little, but
+    dropping both costs a lot, the pair carries information neither group can
+    supply on its own. ``synergy`` is that gap; a positive value means the two
+    groups are *not* interchangeable even though each looks redundant alone.
+    """
+    rows = []
+    blocks = deltas[deltas.condition == 'drop_block']
+    singles = deltas[deltas.condition == 'drop_group']
+    for record in blocks.itertuples():
+        first, second = record.group.split('+')
+        own = singles[(singles.task == record.task) & (singles.model == record.model)
+                      & (singles.seed == record.seed)
+                      & (singles.group.isin([first, second]))]
+        if len(own) != 2:
+            continue
+        row = dict(task=record.task, model=record.model, seed=int(record.seed),
+                   block=record.group, n_features=int(record.n_features),
+                   block_log_loss_delta=float(record.delta_log_loss),
+                   single_max_log_loss_delta=float(own.delta_log_loss.max()),
+                   single_sum_log_loss_delta=float(own.delta_log_loss.sum()))
+        row['synergy'] = float(record.delta_log_loss) - float(own.delta_log_loss.sum())
+        if 'delta_macro_f1' in record._fields:
+            row['block_macro_f1_delta'] = float(record.delta_macro_f1)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def build_deltas(runs):
@@ -213,6 +288,22 @@ def build_deltas(runs):
     return pd.DataFrame(rows)
 
 
+def recall_deltas(runs):
+    """Per-class recall change (condition minus full) for every condition."""
+    rows = []
+    full = runs[runs.condition == 'full'].set_index(['task', 'model', 'seed'])
+    for record in runs[runs.condition != 'full'].itertuples():
+        base = json.loads(full.loc[(record.task, record.model, record.seed),
+                                   'per_class_recall'])
+        current = json.loads(record.per_class_recall)
+        for label, value in current.items():
+            rows.append(dict(task=record.task, model=record.model, seed=record.seed,
+                             condition=record.condition, group=record.group,
+                             control_index=record.control_index, label=label,
+                             delta_recall=float(value) - float(base[label])))
+    return pd.DataFrame(rows)
+
+
 def summarise(deltas, args):
     """Aggregate across seeds and compare each group against the random null.
 
@@ -226,18 +317,25 @@ def summarise(deltas, args):
     for (task, model), block in deltas.groupby(['task', 'model']):
         null = block[block.condition == 'random_drop']
         for group, observed in block[block.condition == 'drop_group'].groupby('group'):
+            # Controls are matched by group: same number of features and drawn
+            # from the complement of that group. Pooling across groups would mix
+            # different removal sizes and invalidate the "same-size" comparison.
+            matched = null[null.group == group]
             row = dict(task=task, model=model, group=group,
                        n_features=int(observed.n_features.iloc[0]),
-                       n_seeds=int(observed.seed.nunique()))
-            for metric in ('log_loss', 'f1', 'macro_f1'):
+                       n_seeds=int(observed.seed.nunique()),
+                       n_controls=int(matched.control_index.nunique()))
+            for metric in METRICS:
                 column = f'delta_{metric}'
                 row[f'{metric}_delta_mean'] = float(observed[column].mean())
                 row[f'{metric}_delta_sd'] = float(observed[column].std(ddof=1)) \
                     if len(observed) > 1 else float('nan')
-                row[f'{metric}_null_mean'] = float(null[column].mean()) if len(null) else np.nan
-                row[f'{metric}_null_sd'] = float(null[column].std(ddof=1)) if len(null) > 1 else np.nan
-                # Pooled matched null: fraction of random drops at least as harmful.
-                values = null[column].dropna().to_numpy()
+                row[f'{metric}_null_mean'] = (float(matched[column].mean())
+                                              if len(matched) else np.nan)
+                row[f'{metric}_null_sd'] = (float(matched[column].std(ddof=1))
+                                            if len(matched) > 1 else np.nan)
+                # Fraction of matched random drops at least as harmful.
+                values = matched[column].dropna().to_numpy()
                 effect = row[f'{metric}_delta_mean']
                 row[f'{metric}_p_empirical'] = (
                     float((np.sum(values >= effect) + 1) / (len(values) + 1))
@@ -269,16 +367,20 @@ def figures(summary, deltas, tasks):
                                  squeeze=False, sharey=True)
         for ax, model in zip(axes[0], models):
             part = block[block.model == model].sort_values('log_loss_delta_mean')
-            null_mean = part.log_loss_null_mean.mean()
-            null_sd = part.log_loss_null_sd.mean()
             colours = ['#b5453a' if p < 0.05 else '#7f8c8d'
                        for p in part.log_loss_p_empirical]
-            ax.barh(part.group, part.log_loss_delta_mean, color=colours)
+            bars = ax.barh(part.group, part.log_loss_delta_mean, color=colours)
             ax.axvline(0, color='black', lw=.8)
-            ax.axvline(null_mean, color='#2c6fbb', ls='--', lw=1,
-                       label='random-drop mean')
-            ax.axvspan(null_mean - null_sd, null_mean + null_sd, color='#2c6fbb',
-                       alpha=.15, label='±1 SD of null')
+            for bar, (_, row) in zip(bars, part.iterrows()):
+                centre = bar.get_y() + bar.get_height() / 2
+                ax.plot([row.log_loss_null_mean] * 2, [centre - .32, centre + .32],
+                        color='#2c6fbb', lw=2)
+                if np.isfinite(row.log_loss_null_sd):
+                    ax.plot([row.log_loss_null_mean - row.log_loss_null_sd,
+                             row.log_loss_null_mean + row.log_loss_null_sd],
+                            [centre, centre], color='#2c6fbb', lw=1, alpha=.6)
+            ax.plot([], [], color='#2c6fbb', lw=2, label='random-drop mean (matched)')
+            ax.plot([], [], color='#2c6fbb', lw=1, alpha=.6, label='±1 SD')
             ax.set_title(model)
             ax.set_xlabel('Δ log-loss when group removed')
             ax.legend(fontsize=7, loc='lower right')
@@ -305,52 +407,140 @@ def figures(summary, deltas, tasks):
     plt.close(fig)
 
 
-def write_report(summary, rankings, deltas, correlation, tasks, args):
+def saturation_note(deltas, task_name):
+    """Warn when a task is so well solved that ablation cannot resolve groups.
+
+    A group's delta is bounded above by the headroom the full model leaves. On
+    a task with log-loss ~7e-05 and F1 = 1.0 there is no headroom, so deltas of
+    ~1e-5 are noise and "no group matters" would be a measurement artefact, not
+    a finding. This must be stated before any ranking is read.
+    """
+    block = deltas[deltas.task == task_name]
+    headroom = float(block['full_log_loss'].min())
+    ceiling = block['full_f1'].dropna().max() if block['full_f1'].notna().any() else np.nan
+    ceiling_macro = (block['full_macro_f1'].dropna().max()
+                     if block['full_macro_f1'].notna().any() else np.nan)
+    observed = float(block['delta_log_loss'].abs().max())
+    saturated = headroom < SATURATION_LOG_LOSS
+    return dict(task=task_name, full_log_loss_min=headroom, full_f1_max=ceiling,
+                full_macro_f1_max=ceiling_macro, max_abs_delta=observed,
+                headroom_ratio=(observed / headroom if headroom > 0 else np.nan),
+                saturated=saturated)
+
+
+def write_report(summary, rankings, deltas, correlation, tasks, args, block_table=None):
+    split = getattr(args, 'split', 'random')
     lines = ['# Group ablation: bỏ từng nhóm đặc trưng forensic\n']
-    lines.append('Sinh bởi `python/run_group_ablation.py`. Đây là thực nghiệm **mới**, '
-                 'độc lập với pipeline đã kiểm chứng; không ghi đè artifact cũ.\n')
+    lines.append('Sinh bởi `python/run_group_ablation.py`. Không ghi đè artifact cũ.\n')
     lines.append('## 1. Câu hỏi và thiết kế\n')
     lines.append('- Câu hỏi: bỏ toàn bộ một nhóm plugin có làm mô hình **tệ hơn** nhiều '
                  'hơn việc bỏ một số lượng đặc trưng ngẫu nhiên bằng đúng nhóm đó không?')
     lines.append('- Mỗi điều kiện: fit lại mô hình từ đầu trên cùng split, cùng seed, '
                  'cùng siêu tham số. Ngân sách tuning = 0 và **bằng nhau** cho mọi điều kiện.')
+    lines.append(f'- Split: `{split}`'
+                 + (' — mọi snapshot của cùng một specimen nằm về MỘT phía '
+                    '(khắc phục 99,8% specimen giao train/test của split ngẫu nhiên cũ).'
+                    if split == 'source_aware' else
+                    ' — chia dòng ngẫu nhiên, **có specimen leakage** (xem TECHNICAL_AUDIT §3).'))
     lines.append('- Đối chứng: với mỗi nhóm k đặc trưng, bỏ k đặc trưng ngẫu nhiên lấy từ '
                  f'**phần bù** của nhóm, {args.controls} lần rút.')
-    lines.append('- Metric chính: `log_loss`. F1 nhị phân đã bão hoà ở 1.0 nên không thể '
-                 'xếp hạng các điều kiện; F1/macro-F1 vẫn được báo cáo.\n')
-    lines.append('## 2. Phạm vi đã chạy\n')
+    if getattr(args, 'blocks', 0):
+        lines.append(f'- Block-out: {args.blocks} cặp nhóm có |ρ|cross cao nhất bị bỏ '
+                     '**đồng thời**, để phân biệt "nhóm vô dụng" với "hai nhóm thay thế '
+                     'nhau".\n')
+    lines.append('- Metric chính: `log_loss`.\n')
+
+    notes = pd.DataFrame([saturation_note(deltas, t) for t in summary.task.unique()])
+    lines.append('## 2. Kiểm tra bão hoà trước khi đọc hạng\n')
+    display = notes.copy()
+    display.columns = ['task', 'log-loss full nhỏ nhất', 'F1 full lớn nhất',
+                       'macro-F1 full lớn nhất', '|Δ| lớn nhất quan sát',
+                       'tỷ lệ Δ/headroom', 'bão hoà?']
+    lines.append(table_text(display.round(6)) + '\n')
+    for row in notes.itertuples():
+        if row.saturated:
+            lines.append(f'- **`{row.task}` BÃO HOÀ** (log-loss full {row.full_log_loss_min:.2e} '
+                         f'< {SATURATION_LOG_LOSS:.0e}). Mọi Δ trên task này nằm trong phần '
+                         'cuối của thang đo và **không được dùng để kết luận nhóm nào vô '
+                         'quan trọng**; chỉ dùng làm đối chứng phương pháp.')
+    if not notes.saturated.any():
+        lines.append('- Không task nào bão hoà; Δ có headroom để giải thích.')
+    lines.append('')
+
+    lines.append('## 3. Phạm vi đã chạy\n')
     lines.append(f'- Task: {", ".join(args.tasks)}; model: {", ".join(args.models)}; '
-                 f'seed: {", ".join(map(str, args.seeds))}.')
+                 f'seed: {", ".join(map(str, args.seeds))}; split: `{split}`.')
     for task_name, task in tasks.items():
         lines.append(f'- `{task_name}`: {len(task.frame):,} dòng, {task.n_classes} lớp'
                      + (f', bỏ {task.conflicts_dropped} dòng xung đột nhãn '
                         f'({task.conflict_groups} nhóm vector)'
                         if task.conflicts_dropped else '') + '.')
-    lines.append('')
-    lines.append('## 3. Kết quả theo task\n')
+    total_fits = int((deltas.condition != 'full').sum() + 1)
+    lines.append(f'- Tổng số lần fit mô hình được ghi nhận: ~{total_fits:,}.\n')
+
+    lines.append('## 4. Kết quả theo task\n')
     for task in summary.task.unique():
         block = summary[summary.task == task]
+        saturated = bool(notes[notes.task == task].saturated.iloc[0])
         lines.append(f'### {task}\n')
-        table = block[['model', 'group', 'n_features', 'log_loss_delta_mean',
-                       'log_loss_delta_sd', 'log_loss_null_mean',
-                       'log_loss_p_empirical', 'rank_log_loss']].copy()
-        table.columns = ['model', 'nhóm', 'số feature', 'Δlog-loss TB', 'SD qua seed',
-                         'null TB', 'p thực nghiệm', 'hạng']
+        columns = [c for c in ['model', 'group', 'n_features', 'log_loss_delta_mean',
+                               'log_loss_delta_sd', 'log_loss_null_mean', 'log_loss_null_sd',
+                               'log_loss_p_empirical', 'accuracy_delta_mean',
+                               'macro_f1_delta_mean', 'roc_auc_delta_mean',
+                               'pr_auc_delta_mean', 'rank_log_loss']
+                   if c in block.columns]
+        friendly = {'model': 'model', 'group': 'nhóm', 'n_features': 'số feature giữ lại',
+                    'log_loss_delta_mean': 'Δlog-loss TB', 'log_loss_delta_sd': 'SD qua seed',
+                    'log_loss_null_mean': 'null TB', 'log_loss_null_sd': 'null SD',
+                    'log_loss_p_empirical': 'p thực nghiệm',
+                    'accuracy_delta_mean': 'Δaccuracy TB',
+                    'macro_f1_delta_mean': 'Δmacro-F1 TB',
+                    'roc_auc_delta_mean': 'ΔROC-AUC TB',
+                    'pr_auc_delta_mean': 'ΔPR-AUC TB',
+                    'rank_log_loss': 'hạng'}
+        table = block[columns].copy()
+        table.columns = [friendly.get(c, c) for c in columns]
         lines.append(table_text(table.round(5)) + '\n')
         significant = block[block.log_loss_p_empirical < 0.05]
-        if len(significant):
+        if saturated:
+            lines.append('- Task bão hoà: **không diễn giải bảng này thành kết luận về '
+                         'tầm quan trọng của nhóm**.')
+        elif len(significant):
             lines.append('- Nhóm vượt đối chứng ngẫu nhiên (p < 0.05): ' +
                          ', '.join(f'`{g}`' for g in
                                    significant.sort_values('rank_log_loss').group) + '.')
         else:
-            lines.append('- **Không nhóm nào** vượt đối chứng ngẫu nhiên ở p < 0.05: '
-                         'không có bằng chứng ablation cho lợi ích dự đoán của bất kỳ nhóm nào.')
+            lines.append('- Không nhóm nào vượt đối chứng ngẫu nhiên ở p < 0.05 **trên task '
+                         'này và split này**. Đây là phát ngôn có phạm vi, không phải phát '
+                         'ngôn chung về giá trị forensic của các nhóm.')
         lines.append('')
-    lines.append('![Group ablation](../results/group_experiments/ablation/figures/'
-                 'ablation_binary.png)\n')
-    lines.append('![Phân bố hiệu ứng](../results/group_experiments/ablation/figures/'
+    recall_path = OUT / 'per_class_recall_deltas.csv'
+    if recall_path.exists():
+        record = pd.read_csv(recall_path)
+        record = record[record.condition == 'drop_group']
+        if len(record):
+            lines.append('### 4.1 Thay đổi recall theo từng lớp khi bỏ nhóm\n')
+            lines.append('Δrecall = recall(sau khi bỏ nhóm) − recall(full); âm = lớp đó '
+                         'bị mất recall. Bảng chỉ dùng drop group, không trộn đối chứng.\n')
+            pivot = record.pivot_table(index='group', columns='label',
+                                       values='delta_recall', aggfunc='mean')
+            lines.append(table_text(pivot.round(4)) + '\n')
+    for task in summary.task.unique():
+        lines.append(f'![Group ablation — {task}](../{OUT.relative_to(ROOT)}/figures/'
+                     f'ablation_{task}.png)\n')
+    lines.append(f'![Phân bố hiệu ứng](../{OUT.relative_to(ROOT)}/figures/'
                  'ablation_delta_distribution.png)\n')
-    lines.append('## 4. Tương quan giữa các nhóm (khả năng thay thế)\n')
+
+    if block_table is not None and len(block_table):
+        lines.append('## 5. Block-out: bổ sung hay thay thế?\n')
+        lines.append('`synergy` = Δ(cả hai nhóm) − Δ(nhóm A) − Δ(nhóm B). Dương có nghĩa '
+                     'hai nhóm **cùng nhau** mang thông tin mà từng nhóm đơn lẻ không '
+                     'cung cấp được — tức là không thay thế được nhau, dù Δ đơn lẻ nhỏ.\n')
+        display = block_table.copy()
+        display.columns = [c.replace('_', ' ') for c in display.columns]
+        lines.append(table_text(display.round(6)) + '\n')
+
+    lines.append('## 6. Tương quan giữa các nhóm (khả năng thay thế)\n')
     for task_name, corr in correlation.items():
         top = corr.head(3)
         lines.append(f'- `{task_name}`: cặp tương quan mạnh nhất — ' + '; '.join(
@@ -359,24 +549,26 @@ def write_report(summary, rankings, deltas, correlation, tasks, args):
     lines.append('')
     if (OUT / 'substitution.csv').exists():
         sub = pd.read_csv(OUT / 'substitution.csv')
-        lines.append('### 4.1 Kiểm tra thay thế (drop đơn vs drop cặp)\n')
+        lines.append('### 6.1 Kiểm tra thay thế (drop đơn vs drop cặp)\n')
         lines.append('Nếu bỏ cả hai nhóm tương quan **không tệ hơn** bỏ nhóm mạnh hơn một '
                      'mình, hai nhóm chia sẻ thông tin thay vì bổ sung cho nhau.\n')
         lines.append(table_text(sub[['task', 'model', 'group', 'partner', 'condition',
                                      'log_loss', 'macro_f1']].round(5)) + '\n')
-    lines.append('## 5. Cách đọc và giới hạn\n')
+    lines.append('## 7. Cách đọc và giới hạn\n')
     lines.append('- Δ dương = bỏ nhóm làm log-loss tăng = nhóm có ích cho mô hình này.')
     lines.append('- p thực nghiệm so với phân bố random-drop **cùng cỡ**, không phải '
                  'p-value của một phép kiểm định tham số; độ phân giải bị giới hạn bởi '
-                 f'số lần rút ({args.controls} × 9 nhóm × số seed).')
+                 f'số lần rút ({args.controls}).')
     lines.append('- SD qua seed là biến động do chia lại dữ liệu và khởi tạo mô hình; '
                  '**các seed dùng chung dataset nên không phải mẫu độc lập**.')
     lines.append('- Ablation chỉ đo phần thông tin mà mô hình *này* không thể bù đắp bằng '
                  'các nhóm còn lại; nhóm bị thay thế tốt sẽ có Δ≈0 dù bản thân nó có tín hiệu.')
-    lines.append('- Chưa có split theo specimen; xem `report/source_aware_split.md`.\n')
+    lines.append('- Δ≈0 **không** được viết thành "nhóm vô ích"; phải viết "thông tin trong '
+                 'nhóm có thể thay thế bởi nhóm khác", kèm bằng chứng block-out ở mục 5.\n')
     (ROOT / 'report').mkdir(exist_ok=True)
-    (ROOT / 'report' / 'group_ablation.md').write_text('\n'.join(lines))
-    print('Generated report/group_ablation.md', flush=True)
+    name = getattr(args, 'report_name', None) or 'group_ablation.md'
+    (ROOT / 'report' / name).write_text('\n'.join(lines))
+    print(f'Generated report/{name}', flush=True)
 
 
 def write_manifest(args):
@@ -390,10 +582,13 @@ def write_manifest(args):
         tasks=args.tasks,
         models=args.models,
         seeds=args.seeds,
+        split=getattr(args, 'split', 'random'),
+        blocks=getattr(args, 'blocks', 0),
         controls_per_group=args.controls,
         primary_metric='log_loss',
         tuning_budget='none (identical hyper-parameters for every condition)',
         note='Random-drop controls are drawn from the complement of the ablated group.',
+        saturation_threshold_log_loss=SATURATION_LOG_LOSS,
     )
     (OUT / 'manifest.json').write_text(json.dumps(manifest, indent=2))
 
@@ -405,6 +600,17 @@ def main():
     parser.add_argument('--seeds', default='42,43,44,45,46')
     parser.add_argument('--controls', type=int, default=3,
                         help='Matched random-drop draws per group')
+    parser.add_argument('--split', default='random', choices=list(STRATEGIES),
+                        help='random = the verified (leaky) rule; '
+                             'source_aware = no specimen crosses train/test')
+    parser.add_argument('--blocks', type=int, default=0,
+                        help='Jointly ablate this many top-correlated group pairs')
+    parser.add_argument('--out-name', default='ablation',
+                        help='Results subdirectory under results/group_experiments')
+    parser.add_argument('--report-name', default=None,
+                        help='Report file name under report/')
+    parser.add_argument('--force', action='store_true',
+                        help='Allow writing into a results directory that already has runs.csv')
     parser.add_argument('--substitution', action='store_true',
                         help='Also run drop-partner and drop-pair tests')
     parser.add_argument('--substitution-tasks', default='binary,type4')
@@ -420,6 +626,12 @@ def main():
     unknown = set(args.models) - set(MODELS)
     if unknown:
         parser.error(f'unknown models: {sorted(unknown)}')
+    if args.out_name != 'ablation':
+        set_out(args.out_name)
+    if (OUT / 'runs.csv').exists() and not args.force:
+        parser.error(f'{OUT.relative_to(ROOT)}/runs.csv already exists; '
+                     'choose another --out-name or pass --force (never overwrite '
+                     'a previous experiment silently)')
     run(args)
 
 

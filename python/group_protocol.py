@@ -36,6 +36,7 @@ Protocol notes
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -45,7 +46,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassif
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (accuracy_score, average_precision_score,
                              balanced_accuracy_score, f1_score, log_loss,
-                             roc_auc_score)
+                             recall_score, roc_auc_score)
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -85,16 +86,29 @@ class TaskData:
     def n_classes(self) -> int:
         return len(self.classes)
 
-    def split(self, seed: int, test_size: float | None = None):
-        """Stratified holdout on this task's own target."""
+    def split(self, seed: int, test_size: float | None = None, strategy: str = 'random'):
+        """Stratified holdout on this task's own target.
+
+        ``random`` is the verified pipeline's rule (stratified on rows) and stays
+        the default so nothing downstream changes silently. ``source_aware``
+        keeps every specimen on one side of the boundary; see ``split_manager``.
+        """
         if test_size is None:
             test_size = CONFIG['test_size']
-        index = np.arange(len(self.frame))
-        train, test = train_test_split(index, test_size=test_size, stratify=self.y,
-                                       random_state=seed)
+        if strategy == 'source_aware':
+            from split_manager import source_aware_indices, units_for
+            train, test = source_aware_indices(units_for(self), self.y,
+                                               test_size, seed)
+        elif strategy == 'random':
+            index = np.arange(len(self.frame))
+            train, test = train_test_split(index, test_size=test_size, stratify=self.y,
+                                           random_state=seed)
+            train, test = np.sort(train), np.sort(test)
+        else:
+            raise ValueError(f'unknown split strategy {strategy!r}')
         if np.intersect1d(train, test).size:
             raise AssertionError('train/test overlap')
-        return np.sort(train), np.sort(test)
+        return train, test
 
     def features_of(self, group: str) -> list:
         return [f for f in self.features if f.split('.')[0] == group]
@@ -271,20 +285,37 @@ def score(model, X, y, task: TaskData) -> dict:
     if task.n_classes == 2:
         probability = probability[:, 1]
         prediction = (probability >= 0.5).astype(int)
+        recall = recall_score(y, prediction, labels=[0, 1], average=None,
+                              zero_division=0)
         return dict(
             log_loss=float(log_loss(y, probability, labels=[0, 1])),
             accuracy=float(accuracy_score(y, prediction)),
             f1=float(f1_score(y, prediction, zero_division=0)),
             roc_auc=float(roc_auc_score(y, probability)),
             pr_auc=float(average_precision_score(y, probability)),
+            per_class_recall=json.dumps({name: round(float(value), 4)
+                                         for name, value in zip(task.classes, recall)}),
         )
     prediction = probability.argmax(axis=1)
+    recall = recall_score(y, prediction, labels=labels, average=None, zero_division=0)
+    # Macro one-vs-rest AUCs, computed only over classes present in y so a
+    # small held-out class cannot turn the whole metric into an exception.
+    present = [k for k in labels if np.any(y == k)]
+    roc_auc = float(np.mean([roc_auc_score((y == k).astype(int), probability[:, k])
+                             for k in present]))
+    pr_auc = float(np.mean([average_precision_score((y == k).astype(int),
+                                                    probability[:, k])
+                            for k in present]))
     return dict(
         log_loss=float(log_loss(y, probability, labels=labels)),
         accuracy=float(accuracy_score(y, prediction)),
         macro_f1=float(f1_score(y, prediction, labels=labels, average='macro',
                                 zero_division=0)),
+        roc_auc=roc_auc,
+        pr_auc=pr_auc,
         balanced_accuracy=float(balanced_accuracy_score(y, prediction)),
+        per_class_recall=json.dumps({name: round(float(value), 4)
+                                     for name, value in zip(task.classes, recall)}),
     )
 
 

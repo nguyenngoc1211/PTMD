@@ -21,7 +21,15 @@ arf_obj <- adversarial_rf(train[,active,drop=FALSE], num_trees=as.integer(cfg$ar
                           min_node_size=as.integer(cfg$arf_min_node_size), parallel=FALSE,
                           seed=as.integer(cfg$seed))
 # Unbounded outer leaves avoid artificial zero density beyond empirical extrema.
-psi <- forde(arf_obj, train[,active,drop=FALSE], finite_bounds='no', parallel=FALSE)
+# finite_bounds/epsilon are parameterised in config.json; 'no' preserves the
+# original behaviour, 'local'/'global' truncate numeric draws to the empirical
+# support inside the FORDE distribution (arf 0.2.5 accepts no/local/global).
+finite_bounds <- if (is.null(cfg$finite_bounds)) 'no' else as.character(cfg$finite_bounds)
+if (!finite_bounds %in% c('no', 'local', 'global'))
+  stop('cfg$finite_bounds must be one of no/local/global')
+epsilon <- if (is.null(cfg$epsilon)) 0 else as.numeric(cfg$epsilon)
+psi <- forde(arf_obj, train[,active,drop=FALSE], finite_bounds=finite_bounds,
+             epsilon=epsilon, parallel=FALSE)
 saveRDS(list(arf=arf_obj, psi=psi, config=cfg, train_positions=info$arf_train_positions),
         'results/models/arf_model.rds')
 repeats <- cfg$conditional_repeats
@@ -111,7 +119,7 @@ for (j in seq_along(top)) {
 fwrite(cases,'results/intermediate/X_case_studies.csv')
 fwrite(rbindlist(diagnostics),'results/tables/sampling_diagnostics.csv')
 write_json(list(seed=cfg$seed,train_rows=nrow(train),test_rows=n,repeats=repeats,
-                finite_bounds='no',nomatch='na',parallel_sampling=TRUE,seed_strategy="explicit per-feature seed; no nested RNG parallelism",
+                finite_bounds=finite_bounds,epsilon=epsilon,nomatch='na',parallel_sampling=TRUE,seed_strategy="explicit per-feature seed; no nested RNG parallelism",
                 arf_version=as.character(packageVersion('arf')),r_version=R.version.string,
                 discriminator_accuracy=arf_obj$acc,
                 active_features=active), 'results/intermediate/arf_metadata.json',auto_unbox=TRUE,pretty=TRUE)

@@ -8,6 +8,8 @@
   "permutation_repeats": 30,
   "arf_num_trees": 20,
   "arf_min_node_size": 20,
+  "finite_bounds": "no",
+  "epsilon": 0.0,
   "threads": 4,
   "alpha": 0.05
 }

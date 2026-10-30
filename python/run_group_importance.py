@@ -65,10 +65,11 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from common import CONFIG, ROOT, logloss_rows
+from common import CONFIG, ROOT
 from generate_report import table as table_text
 from group_protocol import (GROUPS, MODELS, TASKS, group_map, load_tasks,
                             make_model, random_feature_sets, rank_values, score)
+from split_manager import load_locked
 
 OUT = ROOT / 'results' / 'group_experiments' / 'importance'
 
@@ -81,12 +82,23 @@ def fit(task, train, columns, model_name, seed):
     return model, index
 
 
+def _row_logloss(probability, y):
+    """Per-row log-loss for binary probabilities or a full class matrix."""
+    probability = np.asarray(probability, dtype=np.float64)
+    y = np.asarray(y)
+    if probability.ndim == 1:
+        p = np.clip(probability, 1e-15, 1 - 1e-15)
+        return -(y * np.log(p) + (1 - y) * np.log1p(-p))
+    p = np.clip(probability[np.arange(len(y)), y], 1e-15, 1.0)
+    return -np.log(p)
+
+
 def permutation(task, model, index, test, groups, repeats, seed, controls):
     """Jointly permute each group block; return per-row and aggregate effects."""
     X = task.frame[task.features].to_numpy(dtype=np.float64)
     X_test = X[np.ix_(test, index)]
     y_test = task.y[test]
-    base_loss = logloss_rows(y_test, _positive_probability(model, X_test, task))
+    base_loss = _row_logloss(model.predict_proba(X_test), y_test)
     base = score(model, X_test, y_test, task)
     rng = np.random.default_rng(seed)
     rows = {}
@@ -98,7 +110,7 @@ def permutation(task, model, index, test, groups, repeats, seed, controls):
             permuted = X_test.copy()
             order = rng.permutation(len(X_test))
             permuted[:, local] = X_test[np.ix_(order, local)]
-            loss = logloss_rows(y_test, _positive_probability(model, permuted, task))
+            loss = _row_logloss(model.predict_proba(permuted), y_test)
             effects.append(loss - base_loss)
         mean_effect = np.mean(effects, axis=0)
         rows[group] = mean_effect
@@ -115,7 +127,7 @@ def permutation(task, model, index, test, groups, repeats, seed, controls):
                 permuted = X_test.copy()
                 order = rng.permutation(len(X_test))
                 permuted[:, local_random] = X_test[np.ix_(order, local_random)]
-                loss = logloss_rows(y_test, _positive_probability(model, permuted, task))
+                loss = _row_logloss(model.predict_proba(permuted), y_test)
                 effects.append(loss - base_loss)
             mean_effect = np.mean(effects, axis=0)
             runs.append(dict(condition='permute_random', group=group, control_index=k,
@@ -124,11 +136,6 @@ def permutation(task, model, index, test, groups, repeats, seed, controls):
                              if repeats > 1 else float('nan'),
                              delta_macro_f1=float('nan')))
     return pd.DataFrame(runs), pd.DataFrame(rows), base
-
-
-def _positive_probability(model, X, task):
-    probability = model.predict_proba(X)
-    return probability[:, 1] if task.n_classes == 2 else probability
 
 
 def shapley(task, model, index, test, groups, n_explain, n_background, seed):
@@ -216,7 +223,10 @@ def run(args):
     for task_name, task in tasks.items():
         groups = group_map(task.features)
         for seed in args.seeds:
-            train, test = task.split(seed)
+            if args.split == 'source_aware':
+                train, test = load_locked(args.version, task_name, seed)
+            else:
+                train, test = task.split(seed)
             for model_name in args.models:
                 model, index = fit(task, train, task.features, model_name, seed)
                 if 'permutation' in methods:
@@ -274,7 +284,7 @@ def run(args):
         shapley_table.to_csv(OUT / 'shapley_groups.csv', index=False)
         (OUT / 'shapley_checks.json').write_text(json.dumps(checks, indent=2))
         figures_shapley(shapley_table)
-    build_rankings()
+    build_rankings(args.ablation_name)
     write_report(args)
     write_manifest(args)
     print(f'Group importance artifacts written to {OUT.relative_to(ROOT)}', flush=True)
@@ -304,7 +314,7 @@ def summarise_permutation(runs):
     return summary.sort_values(['task', 'model', 'rank'])
 
 
-def build_rankings():
+def build_rankings(ablation_name='ablation'):
     """Long table of per-run group rankings from every method that has run."""
     frames = []
     path = OUT / 'permutation_runs.csv'
@@ -326,7 +336,7 @@ def build_rankings():
                                model=record.model, seed=int(record.seed),
                                group=record.group, rank=float(record.rank),
                                value=float(record.mean_abs_phi)))
-    path = ROOT / 'results' / 'group_experiments' / 'ablation' / 'rankings.csv'
+    path = ROOT / 'results' / 'group_experiments' / ablation_name / 'rankings.csv'
     if path.exists():
         table = pd.read_csv(path)
         for record in table.itertuples():
@@ -390,7 +400,11 @@ def write_report(args):
                  'quan hệ giữa nhóm và phần còn lại.')
     lines.append('- Group Shapley: tính **chính xác** trên 2^9 = 512 liên minh, hàm giá trị '
                  'interventional `v(S) = E_background[f(x_S, B_S^c)]`. Chín giá trị cộng lại '
-                 'đúng bằng `f(x) − v(∅)` (có kiểm tra cộng tính).\n')
+                 'đúng bằng `f(x) − v(∅)` (có kiểm tra cộng tính).')
+    lines.append(f'- Chia dữ liệu: `{args.split}`'
+                 + (f' (khóa `{args.version}`)' if args.split == 'source_aware' else '')
+                 + f'; {args.permutation_repeats} hoán vị/nhóm, {args.controls} khối đối '
+                 'chứng cùng độ rộng.\n')
     lines.append('## 2. Kết quả permutation\n')
     path = OUT / 'permutation_summary.csv'
     if path.exists():
@@ -404,7 +418,7 @@ def write_report(args):
                                'null TB', 'p thực nghiệm', 'hạng']
             lines.append(table_text(display.round(5)) + '\n')
             lines.append('![Group permutation]'
-                         f'(../results/group_experiments/importance/figures/'
+                         f'(../{OUT.relative_to(ROOT)}/figures/'
                          f'permutation_{task}.png)\n')
     lines.append('## 3. Kết quả group Shapley\n')
     path = OUT / 'shapley_groups.csv'
@@ -421,7 +435,7 @@ def write_report(args):
                 ['model', 'mean_abs_phi'], ascending=[True, False])
             lines.append(table_text(block.round(5)) + '\n')
             lines.append('![Group Shapley]'
-                         f'(../results/group_experiments/importance/figures/'
+                         f'(../{OUT.relative_to(ROOT)}/figures/'
                          f'shapley_{task}.png)\n')
         checks = json.loads((OUT / 'shapley_checks.json').read_text())
         worst = max(c['additivity_max_error'] for c in checks)
@@ -438,8 +452,10 @@ def write_report(args):
     lines.append('- Các seed dùng chung dataset nên SD qua seed là biến động chạy lại, không '
                  'phải khoảng tin cậy.\n')
     (ROOT / 'report').mkdir(exist_ok=True)
-    (ROOT / 'report' / 'group_importance.md').write_text('\n'.join(lines))
-    print('Generated report/group_importance.md', flush=True)
+    suffix = args.out_name.removeprefix('importance').lstrip('_')
+    name = f'group_importance_{suffix}.md' if suffix else 'group_importance.md'
+    (ROOT / 'report' / name).write_text('\n'.join(lines))
+    print(f'Generated report/{name}', flush=True)
 
 
 def write_manifest(args):
@@ -451,6 +467,8 @@ def write_manifest(args):
         dataset_sha256=hashlib.sha256(data_path.read_bytes()).hexdigest(),
         config=CONFIG, methods=args.methods, tasks=args.tasks,
         models=args.models, seeds=args.seeds,
+        split=args.split, split_version=args.version,
+        ablation_name=args.ablation_name,
         permutation_repeats=args.permutation_repeats,
         permutation_controls=args.controls,
         shapley_models=args.shapley_models,
@@ -474,7 +492,16 @@ def main():
                         help='Models to run exact group Shapley for')
     parser.add_argument('--shapley-explain', type=int, default=400)
     parser.add_argument('--shapley-background', type=int, default=64)
+    parser.add_argument('--split', default='source_aware')
+    parser.add_argument('--version', default='source_aware_v1')
+    parser.add_argument('--out-name', default='importance',
+                        help='results subdirectory under group_experiments')
+    parser.add_argument('--ablation-name', default='ablation',
+                        help='ablation results directory used for cross-method '
+                             'rankings (e.g. ablation_v2)')
     args = parser.parse_args()
+    global OUT
+    OUT = ROOT / 'results' / 'group_experiments' / args.out_name
     args.tasks = [t.strip() for t in args.tasks.split(',') if t.strip()]
     args.models = [m.strip() for m in args.models.split(',') if m.strip()]
     args.seeds = [int(s) for s in args.seeds.split(',') if s.strip()]
