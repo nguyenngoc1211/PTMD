@@ -456,7 +456,7 @@ def write_report(args):
                          f'(../{OUT.relative_to(ROOT)}/figures/'
                          f'shapley_{task}.png)\n')
         checks = json.loads((OUT / 'shapley_checks.json').read_text())
-        worst = max(c['additivity_max_error'] for c in checks)
+        worst = max(c['additivity_max_abs_error'] for c in checks)
         lines.append(f'- Kiểm tra cộng tính: sai số tuyệt đối lớn nhất trên mọi lượt chạy là '
                      f'**{worst:.3e}**. Giá trị nhỏ xác nhận phép phân rã đúng là Shapley '
                      'trên đúng hàm giá trị đã khai báo.\n')
