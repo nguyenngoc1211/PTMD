@@ -12,6 +12,7 @@ report/
 BAO_CAO_NHOM.md
 /Obfuscated-MalMem2022.csv
 data/*
+!data/Obfuscated-MalMem2022.csv
 !data/README.md
 !data/manifests/
 data/manifests/*
