@@ -155,6 +155,7 @@ def run(args):
                 print(f'[{task_name}/{model_name}/seed {seed}] full '
                       f'{primary_metric(task)}={full[primary_metric(task)]:.5f} '
                       f'({seconds:.1f}s)', flush=True)
+                t0 = time.time()
 
                 for group in GROUPS:
                     columns = task.complement_of(group)
@@ -180,6 +181,10 @@ def run(args):
                                          group=group, control_index=k,
                                          n_features=len(kept),
                                          fit_seconds=seconds, **metrics))
+                        if (k + 1) % 25 == 0 or k + 1 == args.controls:
+                            print(f'    {group} ctrl {k + 1}/{args.controls} '
+                                  f'({time.time() - t0:.0f}s elapsed)',
+                                  flush=True)
 
                 for group_a, group_b in blocks(task_name, correlation, args):
                     kept = [f for f in task.features

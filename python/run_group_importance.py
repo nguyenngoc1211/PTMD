@@ -101,6 +101,7 @@ def permutation(task, model, index, test, groups, repeats, seed, controls):
     base_loss = _row_logloss(model.predict_proba(X_test), y_test)
     base = score(model, X_test, y_test, task)
     rng = np.random.default_rng(seed)
+    t0 = time.time()
     rows = {}
     runs = []
     for group, members in groups.items():
@@ -135,6 +136,9 @@ def permutation(task, model, index, test, groups, repeats, seed, controls):
                              delta_log_loss_sd=float(np.std(np.mean(effects, axis=1), ddof=1))
                              if repeats > 1 else float('nan'),
                              delta_macro_f1=float('nan')))
+            if (k + 1) % 25 == 0 or k + 1 == controls:
+                print(f'  perm {group} ctrl {k + 1}/{controls} '
+                      f'({time.time() - t0:.0f}s)', flush=True)
     return pd.DataFrame(runs), pd.DataFrame(rows), base
 
 
