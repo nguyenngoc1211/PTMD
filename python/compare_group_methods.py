@@ -27,7 +27,7 @@ from scipy.stats import spearmanr
 from common import CONFIG, ROOT
 from group_protocol import GROUPS
 
-METHODS = ['ablation', 'permutation', 'cfi', 'featurewise']
+METHODS = ['ablation', 'permutation', 'shapley', 'cfi', 'featurewise']
 
 
 def sha256(path):
@@ -59,6 +59,13 @@ def permutation_scores(path, model):
     return pd.DataFrame(rows).set_index('group')
 
 
+def shapley_scores(path, model):
+    table = pd.read_csv(Path(path) / 'shapley_groups.csv')
+    table = table[(table.task == 'family16') & (table.model == model)]
+    return table.set_index('group')[['mean_abs_phi']].rename(
+        columns={'mean_abs_phi': 'shapley_mean_abs_phi'})
+
+
 def cfi_scores(path):
     table = pd.read_csv(Path(path) / 'group_cfi.csv')
     table = table[table.task == 'family16'] if 'task' in table else table
@@ -79,6 +86,8 @@ def rank_table(scores):
     frame = pd.DataFrame(index=scores.index)
     for method in METHODS:
         column = f'{method}_score'
+        if column not in scores:
+            continue
         frame[method] = scores[column]
         frame[f'{method}_rank'] = frame[method].rank(ascending=False, method='average')
     return frame
@@ -88,7 +97,8 @@ def correlation_table(ranks, subsets):
     rows = []
     for scope, groups in subsets.items():
         block = ranks.loc[[g for g in groups if g in ranks.index]]
-        methods = [m for m in METHODS if block[m].notna().sum() >= 3]
+        methods = [m for m in METHODS
+                   if m in block and block[m].notna().sum() >= 3]
         for i, first in enumerate(methods):
             for second in methods[i + 1:]:
                 pair = block[[first, second]].dropna()
@@ -108,6 +118,8 @@ def run(args):
     permutation = permutation_scores(ROOT / 'results' / 'group_experiments' /
                                      args.importance, args.model)
     cfi = cfi_scores(ROOT / 'results' / 'group_experiments' / args.cfi)
+    shapley = shapley_scores(ROOT / 'results' / 'group_experiments' / args.shapley,
+                             args.model)
     featurewise = featurewise_scores(ROOT / 'results' / 'stability' / args.stability,
                                      args.model)
 
@@ -116,6 +128,7 @@ def run(args):
     scores['ablation_p'] = ablation['log_loss_p_empirical']
     scores['permutation_score'] = permutation['permutation_delta_log_loss']
     scores['permutation_p'] = permutation['permutation_p_empirical']
+    scores['shapley_score'] = shapley['shapley_mean_abs_phi']
     scores['cfi_score'] = cfi['conditional_importance']
     scores['cfi_gate_pass'] = cfi['gate_pass']
     scores['cfi_gate_reasons'] = cfi['gate_reasons']
@@ -137,10 +150,13 @@ def run(args):
         dataset_sha256=sha256(ROOT / CONFIG['data']),
         task='family16', split_version='source_aware_v1', model=args.model,
         ablation_source=str(ablation_source.relative_to(ROOT)),
-        importance_dir=args.importance, cfi_dir=args.cfi, stability_dir=args.stability,
+        importance_dir=args.importance, shapley_dir=args.shapley, cfi_dir=args.cfi,
+        stability_dir=args.stability,
         cfi_gate_pass=gate_pass,
         note='Feature-wise scores are single-feature permutations summed inside a '
-             'group, not joint block permutations; they answer a different estimand.',
+             'group, not joint block permutations; they answer a different estimand. '
+             'Group Shapley is an attribution score without a null hypothesis and '
+             'has no p-value.',
     )
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     print(scores.round(4).to_string())
@@ -152,6 +168,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ablation', default='ablation_v2')
     parser.add_argument('--importance', default='importance_v2')
+    parser.add_argument('--shapley', default='importance_shapley')
     parser.add_argument('--cfi', default='cfi_v3')
     parser.add_argument('--stability', default='stability_v1')
     parser.add_argument('--model', default='xgboost')
