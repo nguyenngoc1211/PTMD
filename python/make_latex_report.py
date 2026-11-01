@@ -63,6 +63,7 @@ SYMBOLS = [
     ("μ", r"$\mu$"), ("σ", r"$\sigma$"), ("α", r"$\alpha$"), ("β", r"$\beta$"),
     ("λ", r"$\lambda$"), ("χ", r"$\chi$"), ("≈", r"$\approx$"), ("≥", r"$\geq$"),
     ("≤", r"$\leq$"), ("≠", r"$\neq$"), ("→", r"$\rightarrow$"),
+    ("⇒", r"$\Rightarrow$"), ("⇐", r"$\Leftarrow$"), ("⇔", r"$\Leftrightarrow$"),
     ("←", r"$\leftarrow$"), ("↔", r"$\leftrightarrow$"), ("×", r"$\times$"),
     ("∝", r"$\propto$"), ("∈", r"$\in$"), ("∉", r"$\notin$"), ("∩", r"$\cap$"),
     ("∪", r"$\cup$"), ("∑", r"$\sum$"), ("∅", r"$\varnothing$"), ("∞", r"$\infty$"),
@@ -815,14 +816,23 @@ def fig_serialized_chain() -> str:
               for e, n in b44 if any(k == n for _, k in b43)]
     trail = ", ".join("%.3f" % r for r in ratios).replace(".", ",")
     done = (RESULTS / "group_experiments" / "ablation_xgb_s44" / "summary.csv").exists()
-    mono = len(ratios) >= 3 and all(ratios[i] < ratios[i + 1] for i in range(len(ratios) - 1))
+    vc = lambda x: ("%.3f" % x).replace(".", ",")
+    n_step = max(len(ratios) - 1, 0)
+    rises = sum(1 for i in range(n_step) if ratios[i] < ratios[i + 1])
+    mono = n_step >= 2 and rises == n_step
+    if n_step:
+        net = ("%.1f" % ((ratios[-1] / ratios[0] - 1.0) * 100)).replace(".", ",")
+        drift = ("%d/%d bước tăng, từ %s đến %s (tăng ròng %s\\,%%)"
+                 % (rises, n_step, vc(ratios[0]), vc(ratios[-1]), net))
+    else:
+        drift = "chưa có boundary"
     if done:
-        caveat = ("chuỗi tỉ lệ %s qua %d boundary trọn nhóm; con số trên node ablation là "
+        caveat = ("chuỗi tỉ lệ %s, tức %s qua %d boundary trọn nhóm; con số trên node ablation là "
                   "\\emph{số đo thật} lấy từ boundary cuối, không còn là ước lượng"
-                  % ("trôi có hệ thống" if mono else "không ổn định", len(ratios)))
+                  % (drift, "đơn điệu tăng" if mono else "không đơn điệu", len(ratios)))
     elif mono:
-        caveat = ("đơn điệu tăng qua %d boundary, không hội tụ $\\Rightarrow$ ETA là \\textbf{cận dưới}, "
-                  "mỗi lần sửa là sửa trễ hơn" % len(ratios))
+        caveat = ("đơn điệu tăng qua %d boundary (%s), không hội tụ $\\Rightarrow$ ETA là \\textbf{cận dưới}, "
+                  "mỗi lần sửa là sửa trễ hơn" % (len(ratios), drift))
     else:
         caveat = "chưa đủ ổn định để tin một tỉ lệ đơn lẻ; chỉ boundary mới nhất được duyệt"
     fmt = lambda s: format(int(s), ",d").replace(",", ".")
