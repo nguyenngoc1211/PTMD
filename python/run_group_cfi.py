@@ -486,39 +486,60 @@ def group_constraint_excess(members, block, draw_valid, constraints, X_test, tas
     return float(max(excesses)) if excesses else 0.0
 
 
+def one_seed(task_name, task, seed, args):
+    """Run the full CFI chain for one task/seed; raises if the sampler is invalid."""
+    if args.split == 'source_aware':
+        from split_manager import load_locked
+        train, test = load_locked(args.split_version, task_name, seed)
+    else:
+        train, test = task.split(seed)
+    arf_train = stratified_subset(task.y[train], args.arf_train, seed)
+    importance_test = stratified_subset(task.y[test], args.test_samples, seed)
+    run_r(task_name, seed, task, train[arf_train], test[importance_test],
+          args.repeats, args.finite_bounds, args.epsilon, args.pool)
+    train_frame = task.frame.iloc[train][task.features]
+    domains = classify(train_frame, task.features)
+    constraints = discover_constraints(train_frame, task.features)
+    domains.to_csv(OUT / f'domains_{task_name}_{seed}.csv', index=False)
+    constraints.to_csv(OUT / f'constraints_{task_name}_{seed}.csv', index=False)
+    model = make_model(args.model, task, seed)
+    model.fit(task.frame.iloc[train][task.features].to_numpy(dtype=np.float64),
+              task.y[train])
+    importance, diagnostics = group_importance(
+        task, model, test[importance_test], args.repeats, seed,
+        constraints=constraints, domains=domains, pool=args.pool,
+        epsilon=args.epsilon)
+    meta = json.loads((DRAWS / f'arf_meta_{task_name}_{seed}.json').read_text())
+    return dict(importance=importance, diagnostics=diagnostics, meta=meta)
+
+
 def run(args):
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / 'figures').mkdir(exist_ok=True)
     tasks = load_tasks(args.tasks)
     cfi_rows, diagnostic_rows, meta_rows = [], [], []
+    blocked = []
     for task_name, task in tasks.items():
         for seed in args.seeds:
-            if args.split == 'source_aware':
-                from split_manager import load_locked
-                train, test = load_locked(args.split_version, task_name, seed)
-            else:
-                train, test = task.split(seed)
-            arf_train = stratified_subset(task.y[train], args.arf_train, seed)
-            importance_test = stratified_subset(task.y[test], args.test_samples, seed)
-            run_r(task_name, seed, task, train[arf_train], test[importance_test],
-                  args.repeats, args.finite_bounds, args.epsilon, args.pool)
-            train_frame = task.frame.iloc[train][task.features]
-            domains = classify(train_frame, task.features)
-            constraints = discover_constraints(train_frame, task.features)
-            domains.to_csv(OUT / f'domains_{task_name}_{seed}.csv', index=False)
-            constraints.to_csv(OUT / f'constraints_{task_name}_{seed}.csv', index=False)
-            model = make_model(args.model, task, seed)
-            model.fit(task.frame.iloc[train][task.features].to_numpy(dtype=np.float64),
-                      task.y[train])
-            importance, diagnostics = group_importance(
-                task, model, test[importance_test], args.repeats, seed,
-                constraints=constraints, domains=domains, pool=args.pool,
-                epsilon=args.epsilon)
-            cfi_rows.append(importance)
-            diagnostic_rows.append(diagnostics)
-            meta = json.loads((DRAWS / f'arf_meta_{task_name}_{seed}.json').read_text())
-            meta_rows.append(meta)
+            try:
+                row = one_seed(task_name, task, seed, args)
+            except Exception as exc:
+                blocked.append(dict(task=task_name, seed=seed,
+                                    error_type=type(exc).__name__, error=str(exc)))
+                print(f'[cfi] {task_name}/seed {seed} BLOCKED: '
+                      f'{type(exc).__name__}: {exc}', flush=True)
+                continue
+            cfi_rows.append(row['importance'])
+            diagnostic_rows.append(row['diagnostics'])
+            meta_rows.append(row['meta'])
             print(f'[cfi] {task_name}/seed {seed} done', flush=True)
+
+    if blocked:
+        pd.DataFrame(blocked).to_csv(OUT / 'blocked_seeds.csv', index=False)
+    if not cfi_rows:
+        write_manifest(args, blocked)
+        print('All CFI seeds blocked; no importance rows written', flush=True)
+        return
 
     cfi = pd.concat(cfi_rows, ignore_index=True)
     cfi['q_value'] = np.nan
@@ -707,7 +728,7 @@ def write_report(cfi, diagnostics, summary, args):
     print(f'Generated report/{name}', flush=True)
 
 
-def write_manifest(args):
+def write_manifest(args, blocked=()):
     data_path = ROOT / CONFIG['data']
     manifest = dict(
         script='python/run_group_cfi.py',
@@ -716,6 +737,7 @@ def write_manifest(args):
         dataset=str(CONFIG['data']),
         dataset_sha256=hashlib.sha256(data_path.read_bytes()).hexdigest(),
         config=CONFIG, tasks=args.tasks, seeds=args.seeds, model=args.model,
+        blocked_seeds=list(blocked or ()),
         repeats=args.repeats, pool=args.pool, arf_train=args.arf_train,
         test_samples=args.test_samples,
         split=args.split, split_version=args.split_version,
