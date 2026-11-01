@@ -788,7 +788,45 @@ def prov_missing(parts: list[str]) -> str:
     return "%% MISSING HINH: " + "; ".join(parts) + "\n"
 
 
+BOUND_RE = re.compile(r"^\s+(\S+) ctrl (\d+)/(\d+) \((\d+)s elapsed\)")
+
+
+def _group_boundaries(log_path: Path) -> list:
+    """(elapsed_s, so nhom tich luy) tai moi boundary TRON nhom trong log ablation."""
+    out, seen, last_grp = [], 0, None
+    if not log_path.exists():
+        return out
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = BOUND_RE.match(line)
+        if m and int(m.group(2)) >= int(m.group(3)) and m.group(1) != last_grp:
+            last_grp = m.group(1)
+            seen += 1
+            out.append((int(m.group(4)), seen))
+    return out
+
+
 def fig_serialized_chain() -> str:
+    """Tuoi ETA cua job ablation dang chay tu chinh log, khong tu tri nho."""
+    d44 = RESULTS / "group_experiments" / "ablation_xgb_s44.log"
+    d43 = RESULTS / "group_experiments" / "ablation_xgb_s43.log"
+    b44, b43 = _group_boundaries(d44), _group_boundaries(d43)
+    if b44 and b43:
+        elapsed, ndone = b44[-1]
+        ref = next((e for e, k in b43 if k == ndone), None)
+        total43 = b43[-1][0]
+        if ref and total43:
+            # Chi ngoai suy bang ti so tich luy tai boundary tron nhom. Ti so nay
+            # troi co he thong trong run nay nen moi uoc tinh tu boundary som deu
+            # sai mot phia; thu tu boundary gan nhat la duyet duoc duy nhất.
+            ratio = elapsed / ref
+            left = max(0.0, (total43 * ratio - elapsed)) / 3600.0
+            abl_box = ("%d/9 nhom, $\\approx$ %s\\,s tich luy\\\\ "
+                       "ti le s43 = %.3f $\\cdot$ con $\\approx$ %.1f\\,h"
+                       % (ndone, format(elapsed, ",d").replace(",", "."), ratio, left))
+        else:
+            abl_box = "%d/9 nhom, chura du boundary de ngoai suy" % ndone
+    else:
+        abl_box = "chura co log"
     return r"""
 \begin{figure}[t]\centering
 """ + _src("scripts/chain_after.sh", "watchdog = results/group_experiments/watchdog.log",
@@ -801,7 +839,7 @@ def fig_serialized_chain() -> str:
   arr/.style={-{Latex[length=2.4mm]}, thick, draw=black!60},
 ]
 \node[job, fill=teal!10] (p) at (0,0) {Permutation seed 44\\ \texttt{importance\_v3\_s44}\\ 11.342\,s $\approx$ 3,15\,h\\ \emph{ĐÃ CHẠY, verifier PASS}};
-\node[job] (a) at (4.2,0) {Ablation seed 44\\ \texttt{ablation\_xgb\_s44}\\ $\approx$ 6,6\,h\\ \emph{đang chạy}};
+\node[job] (a) at (4.2,0) {Ablation seed 44\\ \texttt{ablation\_xgb\_s44}\\ @@ABL@@\\ \emph{đang chạy}};
 \node[job] (l) at (8.4,0) {Ablation LogReg\\ \texttt{ablation\_logreg\_v4}\\ $\approx$ 2,7--3,0\,h};
 \node[job] (i) at (12.2,0) {Permutation LogReg\\ \texttt{importance\_v3\_logreg}\\ $\approx$ 7--12\,phút};
 \draw[arr] (p) -- (a); \draw[arr] (a) -- (l); \draw[arr] (l) -- (i);
@@ -826,7 +864,7 @@ def fig_serialized_chain() -> str:
 \end{tikzpicture}
 \caption{Chuỗi thí nghiệm nối tiếp trên máy 4{,}9\,GB và cổng bộ nhớ giữa các job. Mọi số giờ trên hình lấy từ log/artifact của chính run đó.}
 \end{figure}
-"""
+""".replace("@@ABL@@", abl_box)
 
 
 FIGURES = [
@@ -1013,7 +1051,9 @@ def build(out: Path, reports: list[str], do_check: bool) -> int:
 
     body = "\n".join(r"\input{%s}" % p for p in inputs)
     (out / "main.tex").write_text(
-        PREAMBLE + "\n" + TITLE_BLOCK + body + "\n\\input{sec/zz_figures}\n\n\\end{document}\n",
+        PREAMBLE + "\n" + TITLE_BLOCK + body
+        + "\n\\input{sec/zz_figures}\n\n"
+        + "\\end{document}\n",
         encoding="utf-8")
 
     print("latex/: %d báo cáo -> sec/*.tex, %d hình, main.tex" % (len(inputs), len(generated)))
@@ -1064,19 +1104,23 @@ def run_check(out: Path) -> int:
         n += 1
     print("[check] %d file .tex -> ban ASCII tai %s (chi de kiem cau truc, khong phai ban nop)" % (n, check))
     cmd = ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "main.tex"]
-    rc, pages = 0, None
+    rc, prev = 0, None
     for _ in range(4):
-        # Lan tiep theo chi can thiet khi so trang con doi (tham chieu/LastPage lech nhau).
+        # Dung vong lap khi (so trang xuat ra, so trang LastPage) lap lai nguyen ven
+        # qua hai lan bien dich. Khong so sanh hai gia tri nay bang nhau: trang bi
+        # a khong dem so nen lech nhau mot, do la quy uoc hop le cua article.
         rc = subprocess.run(cmd, cwd=check, stdout=subprocess.DEVNULL,
                             stderr=subprocess.STDOUT).returncode
         if rc != 0:
             break
         log = (check / "main.log").read_text(encoding="utf-8", errors="replace")
         m = re.search(r"Output written on main.pdf \((\d+) pages", log)
-        n = int(m.group(1)) if m else None
-        if n == pages:
+        aux = (check / "main.aux").read_text(encoding="utf-8", errors="replace")
+        lp = re.search(r"LastPage\}\{\{\}\{(\d+)\}", aux)
+        cur = (m.group(1) if m else None, lp.group(1) if lp else None)
+        if cur == prev and cur[0] is not None:
             break
-        pages = n
+        prev = cur
     log = (check / "main.log").read_text(encoding="utf-8", errors="replace")
     if rc != 0:
         print("[check] LOI BIEN DICH (rc=%d)" % rc)
