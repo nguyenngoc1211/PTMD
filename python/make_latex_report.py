@@ -814,11 +814,19 @@ def fig_serialized_chain() -> str:
     ratios = [e / next(x for x, k in b43 if k == n)
               for e, n in b44 if any(k == n for _, k in b43)]
     trail = ", ".join("%.3f" % r for r in ratios).replace(".", ",")
-    if len(ratios) >= 3 and all(ratios[i] < ratios[i + 1] for i in range(len(ratios) - 1)):
+    done = (RESULTS / "group_experiments" / "ablation_xgb_s44" / "summary.csv").exists()
+    mono = len(ratios) >= 3 and all(ratios[i] < ratios[i + 1] for i in range(len(ratios) - 1))
+    if done:
+        caveat = ("chuỗi tỉ lệ %s qua %d boundary trọn nhóm; con số trên node ablation là "
+                  "\\emph{số đo thật} lấy từ boundary cuối, không còn là ước lượng"
+                  % ("trôi có hệ thống" if mono else "không ổn định", len(ratios)))
+    elif mono:
         caveat = ("đơn điệu tăng qua %d boundary, không hội tụ $\\Rightarrow$ ETA là \\textbf{cận dưới}, "
                   "mỗi lần sửa là sửa trễ hơn" % len(ratios))
     else:
         caveat = "chưa đủ ổn định để tin một tỉ lệ đơn lẻ; chỉ boundary mới nhất được duyệt"
+    fmt = lambda s: format(int(s), ",d").replace(",", ".")
+    state = "đang chạy"
     if b44 and b43:
         elapsed, ndone = b44[-1]
         ref = next((e for e, k in b43 if k == ndone), None)
@@ -828,10 +836,15 @@ def fig_serialized_chain() -> str:
             # troi co he thong trong run nay nen moi uoc tinh tu boundary som deu
             # sai mot phia; thu tu boundary gan nhat la duyet duoc duy nhất.
             ratio = elapsed / ref
-            left = max(0.0, (total43 * ratio - elapsed)) / 3600.0
-            abl_box = ("%d/9 nhom, $\\approx$ %s\\,s tich luy\\\\ "
-                       "ti le s43 = %.3f $\\cdot$ con $\\approx$ %.1f\\,h"
-                       % (ndone, format(elapsed, ",d").replace(",", "."), ratio, left))
+            if ndone >= 9 and done:
+                # Khong con la uoc luong nua: tong do that, doc tu boundary cuoi.
+                abl_box = "9/9 nhom, %s\\,s tong\\\\ ti le s43 = %.3f" % (fmt(elapsed), ratio)
+                state = "ĐÃ CHẠY --- \\texttt{summary.csv} trên đĩa"
+            else:
+                left = max(0.0, (total43 * ratio - elapsed)) / 3600.0
+                abl_box = ("%d/9 nhom, $\\approx$ %s\\,s tich luy\\\\ "
+                           "ti le s43 = %.3f $\\cdot$ con $\\approx$ %.1f\\,h"
+                           % (ndone, fmt(elapsed), ratio, left))
         else:
             abl_box = "%d/9 nhom, chura du boundary de ngoai suy" % ndone
     else:
@@ -848,7 +861,7 @@ def fig_serialized_chain() -> str:
   arr/.style={-{Latex[length=2.4mm]}, thick, draw=black!60},
 ]
 \node[job, fill=teal!10] (p) at (0,0) {Permutation seed 44\\ \texttt{importance\_v3\_s44}\\ 11.342\,s $\approx$ 3,15\,h\\ \emph{ĐÃ CHẠY, verifier PASS}};
-\node[job] (a) at (4.2,0) {Ablation seed 44\\ \texttt{ablation\_xgb\_s44}\\ @@ABL@@\\ \emph{đang chạy}};
+\node[job] (a) at (4.2,0) {Ablation seed 44\\ \texttt{ablation\_xgb\_s44}\\ @@ABL@@\\ \emph{@@STATE@@}};
 \node[job] (l) at (8.4,0) {Ablation LogReg\\ \texttt{ablation\_logreg\_v4}\\ $\approx$ 2,7--3,0\,h};
 \node[job] (i) at (12.2,0) {Permutation LogReg\\ \texttt{importance\_v3\_logreg}\\ $\approx$ 7--12\,phút};
 \draw[arr] (p) -- (a); \draw[arr] (a) -- (l); \draw[arr] (l) -- (i);
@@ -875,9 +888,9 @@ def fig_serialized_chain() -> str:
 trên hình do chính generator đọc từ log, không gõ tay. Chuỗi tỉ lệ tích lũy seed\,44/seed\,43
 tại các boundary trọn nhóm là @@TRAIL@@; @@CAVEAT@@. Không được ngoại suy từ một mốc
 \emph{giữa} nhóm (ví dụ \texttt{ctrl 100/200}) --- ước lượng đầu tiên của chính run này
-(~21:35) đã mắc lỗi đó và bị loại; bốn ước lượng sau bị loại vì lấy ở boundary quá sớm.}
+(~21:35) đã mắc lỗi đó và bị loại; các ước lượng sau bị loại vì lấy ở boundary quá sớm.}
 \end{figure}
-""".replace("@@ABL@@", abl_box).replace("@@TRAIL@@", trail or "chưa có boundary").replace("@@CAVEAT@@", caveat)
+""".replace("@@ABL@@", abl_box).replace("@@STATE@@", state).replace("@@TRAIL@@", trail or "chưa có boundary").replace("@@CAVEAT@@", caveat)
 
 
 FIGURES = [
