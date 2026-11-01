@@ -683,7 +683,8 @@ def fig_control_floor() -> str:
   at (axis cs:55,0.295) {$n=20$: sàn $p=0{,}0476$ --- sát ngưỡng, nên q\textsubscript{BH} của hạng nhất
    không bao giờ xuống dưới $0{,}0476$; mọi tuyên bố ở $n=20$ chỉ là \emph{pilot}};
 \node[font=\scriptsize, anchor=north west, text=teal!70!black, align=left, text width=6.0cm]
-  at (axis cs:55,0.185) {$n=200$: sàn $p=0{,}004975$; điều kiện cần $n\geq k/\alpha-1=179$ cho $q<0{,}05$ với $k=9$};
+  at (axis cs:55,0.185) {$n=200$: sàn $p=0{,}004975$, $q_{\min}=k/(n+1)=0{,}0448<0{,}05$;
+   điều kiện đúng là $n+1>k/\alpha=180$, tức $n\geq180$ ($n=179$ cho $q_{\min}=0{,}0500$, \emph{không} đạt)};
 \end{axis}
 \end{tikzpicture}
 \caption{Vì sao bằng chứng chính phải chạy 200 đối chứng: thêm seed giảm variance nhưng \emph{không} hạ được sàn~$p$; chỉ thêm đối chứng mới hạ được. Đây là lý do các bảng $n=20$ trong dự án bị giáng xuống pilot và toàn bộ tuyên bố chính đặt trên $n=200$.}
