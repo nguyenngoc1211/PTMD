@@ -1026,20 +1026,23 @@ def fig_serialized_chain() -> str:
         est.sort(key=lambda kv: kv[1])
         (nlo, lo), (nhi, hi) = est[0], est[-1]
         vh = lambda x: ("%.1f" % (x / 3600.0)).replace(".", ",")
-        hspan = ("%s--%s\\,h" % (vh(lo), vh(hi)) if hi > 1.02 * lo else "%s\\,h" % vh(hi))
-        agree = hi <= 1.02 * lo
+        vh2 = lambda x: ("%.2f" % (x / 3600.0)).replace(".", ",")
+        agree = vh(lo) == vh(hi)
+        hspan = "%s\\,h" % vh(hi) if agree else "%s--%s\\,h" % (vh(lo), vh(hi))
         m_done = (sum(feats[g] for g in names) / float(len(bn))) if feats else 0.0
         m_all = (sum(feats.values()) / float(len(GROUPS_ORDER))) if feats else 0.0
-        why = (("chúng trùng nhau ở đây chỉ vì %d nhóm đã xong trung bình %.1f feature, sát mức "
-                 "%.1f của cả chín nhóm" % (len(bn), m_done, m_all)).replace(".", ",")
+        why = (("bằng nhau ở độ tròn của node và trùng nhau vì lý do số học: %d nhóm đã "
+                "xong trung bình %.1f feature, sát mức %.1f của cả chín nhóm"
+                % (len(bn), m_done, m_all)).replace(".", ",")
                if agree else
-               "chúng lệch nhau %.0f\\,%% --- chỉ số lớn hơn được duyệt làm ETA" % ((hi / lo - 1.0) * 100))
+               "lệch nhau %.1f\\,%% --- chỉ số lớn hơn được duyệt làm ETA"
+               % ((hi / lo - 1.0) * 100))
         return ("%d/%d nhóm\\\\ $\\approx$ %s, còn $\\approx$ %s\\,h"
                 % (len(bn), len(GROUPS_ORDER), hspan, vh(hi - elapsed))), \
                ("Node LogReg (%d/%d nhóm, %s\\,s đã đo) ngoại suy từ %d boundary trọn nhóm của chính "
                 "nó: %s cho %s\\,h, %s cho %s\\,h; %s. Hai cách chia chỉ dùng chung một tập mốc đo "
                 "nên không độc lập với nhau."
-                % (len(bn), len(GROUPS_ORDER), fmt(elapsed), len(bn), nlo, vh(lo), nhi, vh(hi), why))
+                % (len(bn), len(GROUPS_ORDER), fmt(elapsed), len(bn), nlo, vh2(lo), nhi, vh2(hi), why))
 
     lg_box_txt, lg_note = lg_box()
 
