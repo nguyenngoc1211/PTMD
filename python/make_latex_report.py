@@ -811,6 +811,14 @@ def fig_serialized_chain() -> str:
     d44 = RESULTS / "group_experiments" / "ablation_xgb_s44.log"
     d43 = RESULTS / "group_experiments" / "ablation_xgb_s43.log"
     b44, b43 = _group_boundaries(d44), _group_boundaries(d43)
+    ratios = [e / next(x for x, k in b43 if k == n)
+              for e, n in b44 if any(k == n for _, k in b43)]
+    trail = ", ".join("%.3f" % r for r in ratios).replace(".", ",")
+    if len(ratios) >= 3 and all(ratios[i] < ratios[i + 1] for i in range(len(ratios) - 1)):
+        caveat = ("đơn điệu tăng qua %d boundary, không hội tụ $\\Rightarrow$ ETA là \\textbf{cận dưới}, "
+                  "mỗi lần sửa là sửa trễ hơn" % len(ratios))
+    else:
+        caveat = "chưa đủ ổn định để tin một tỉ lệ đơn lẻ; chỉ boundary mới nhất được duyệt"
     if b44 and b43:
         elapsed, ndone = b44[-1]
         ref = next((e for e, k in b43 if k == ndone), None)
@@ -863,9 +871,13 @@ def fig_serialized_chain() -> str:
    (925\,s/nhóm) --- gấp $\sim$3 lần toàn bộ phần còn lại mà không đổi được kết luận nào đã ghi,
    chỉ thêm một dòng model ở sàn $p$ thấp.};
 \end{tikzpicture}
-\caption{Chuỗi thí nghiệm nối tiếp trên máy 4{,}9\,GB và cổng bộ nhớ giữa các job. Mọi số giờ trên hình lấy từ log/artifact của chính run đó.}
+\caption{Chuỗi thí nghiệm nối tiếp trên máy 4{,}9\,GB và cổng bộ nhớ giữa các job. Mọi số giờ
+trên hình do chính generator đọc từ log, không gõ tay. Chuỗi tỉ lệ tích lũy seed\,44/seed\,43
+tại các boundary trọn nhóm là @@TRAIL@@; @@CAVEAT@@. Không được ngoại suy từ một mốc
+\emph{giữa} nhóm (ví dụ \texttt{ctrl 100/200}) --- ước lượng đầu tiên của chính run này
+(~21:35) đã mắc lỗi đó và bị loại; bốn ước lượng sau bị loại vì lấy ở boundary quá sớm.}
 \end{figure}
-""".replace("@@ABL@@", abl_box)
+""".replace("@@ABL@@", abl_box).replace("@@TRAIL@@", trail or "chưa có boundary").replace("@@CAVEAT@@", caveat)
 
 
 FIGURES = [
