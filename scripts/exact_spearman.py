@@ -5,8 +5,12 @@ For n = 9 the exact null is reachable by enumerating all n! rank orderings, so
 this script reports both and lets the write-up state which one is quoted.
 
 Value columns must be scores where HIGHER = more important. Do not feed the
-`rank` column of `permutation_summary.csv`: it is ascending (rank 1 = smallest
-delta), so it flips the sign of rho and inverts `top1_match`.
+`rank` column: it is inverse-scaled -- rank 1 is the group with the LARGEST delta
+(checked against all five `permutation_summary.csv` on disk: rank 1 = `handles` =
+max delta in every one). `compare()` re-ranks descending, so a rank column inverts
+`top1_match`, and pairing a rank column with a delta column flips the sign of rho.
+Rank-vs-rank across two splits is safe (both flip), which is why the drift figure
+can use the rank columns while this script is fed deltas.
 """
 
 from __future__ import annotations

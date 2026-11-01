@@ -28,6 +28,12 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results"
 OUT_DEFAULT = ROOT / "latex"
 
+# Mot so hinh tinh lai so thong ke tu module cua project (adjust_bh, exact_two_sided_p)
+# thay vi chep tay; dua thu muc nguon vao path de khong phu thuoc cwd luc chay.
+for _src_dir in (ROOT / "python", ROOT / "scripts"):
+    if str(_src_dir) not in sys.path:
+        sys.path.insert(0, str(_src_dir))
+
 REPORTS = [
     # Chuoi pre-registration: duoc giu nguyen thu tu de thay protocol khoa truoc khi chay.
     # 06_full_research_report.md co y LOAI: do la ban ket qua cu, da bi 09 thay the;
@@ -54,6 +60,11 @@ CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 TOTAL_FEATURES = 55
 GROUPS_ORDER = ["handles", "ldrmodules", "malfind", "dlllist", "svcscan",
                 "pslist", "callbacks", "psxview", "modules"]
+
+# Ba split seed cua tung estimand XGBoost. Mot danh sach du dung cho ca hinh lan caption,
+# de khong the bao cao "hai split" o cho nay va "ba split" o cho kia.
+ABL_RUNS = [("42", "ablation_v4"), ("43", "ablation_xgb_s43"), ("44", "ablation_xgb_s44")]
+REL_RUNS = [("42", "importance_v3"), ("43", "importance_v3_s43"), ("44", "importance_v3_s44")]
 
 # --------------------------------------------------------------------------- #
 # Ký hiệu
@@ -549,58 +560,179 @@ def fig_reliance_splits(seeds: dict[str, str]) -> str:
 
 def fig_rank_drift() -> str:
     util, reli, srcs = {}, {}, []
-    for seed, run in [("42", "ablation_v4"), ("43", "ablation_xgb_s43"), ("44", "ablation_xgb_s44")]:
-        df = read_summary(run, "summary.csv")
-        if df is None:
-            srcs.append("utility %s: CHUA CO ARTIFACT" % run)
-            continue
-        util[seed] = dict(zip(df["group"], df["rank_log_loss"]))
-        srcs.append("utility seed %s = results/group_experiments/%s/summary.csv (cot rank_log_loss)" % (seed, run))
-    for seed, run in [("42", "importance_v3"), ("43", "importance_v3_s43"), ("44", "importance_v3_s44")]:
-        df = read_summary(run, "permutation_summary.csv")
-        if df is None:
-            srcs.append("reliance %s: CHUA CO ARTIFACT" % run)
-            continue
-        reli[seed] = dict(zip(df["group"], df["rank"]))
-        srcs.append("reliance seed %s = results/group_experiments/%s/permutation_summary.csv (cot rank)" % (seed, run))
-    srcs.append("huong cot: rank 1 = nhom quan trong nhat (Delta lon nhat) -- da kiem bang artifact")
+
+    def load(runs, file, rank_col, delta_col, tag, store):
+        for seed, run in runs:
+            df = read_summary(run, file)
+            if df is None:
+                srcs.append("%s %s: CHUA CO ARTIFACT" % (tag, run))
+                continue
+            sub = df[["group", rank_col]].dropna()
+            store[seed] = dict(zip(sub["group"], sub[rank_col]))
+            srcs.append("%s seed %s = results/group_experiments/%s/%s (cot %s)"
+                        % (tag, seed, run, file, rank_col))
+            # Kiem chieu tu artifact: rank 1 phai la nhom co Delta lon nhat, neu khong thi
+            # nhan "1 = quan trong nhat" o truc y la sai va hinh nay khong doc duoc.
+            if delta_col in df:
+                r1 = df.loc[df[rank_col].idxmin(), "group"]
+                mx = df.loc[df[delta_col].idxmax(), "group"]
+                srcs.append("%s s%s chieu: rank1=%s / Delta_max=%s -> %s"
+                            % (tag, seed, r1, mx, "KHOP" if r1 == mx else "LECH CHIEU"))
+
+    load(ABL_RUNS, "summary.csv", "rank_log_loss", "log_loss_delta_mean", "utility", util)
+    load(REL_RUNS, "permutation_summary.csv", "rank", "delta_log_loss_mean", "reliance", reli)
+
+    seeds_all = sorted(set(util) | set(reli))
 
     def lines(ranks):
         res = []
         for g in GROUPS_ORDER:
-            ss = [s for s in sorted(ranks) if g in ranks[s]]
-            if len(ss) < 2:
+            obs = [(x + 1, int(ranks[s][g])) for x, s in enumerate(seeds_all) if g in ranks[s]]
+            if len(obs) < 2:
                 continue
-            pts = "".join("(%d,%d)" % (i + 1, int(ranks[s][g])) for i, s in enumerate(ss))
             res.append(r"\addplot+[thick, mark size=1.9pt] coordinates {%s}; "
-                       r"\node[font=\tiny, anchor=west] at (axis cs:%d,%d) {\texttt{%s}};"
-                       % (pts, len(ss) + 0.05, int(ranks[ss[-1]][g]), g))
+                       r"\node[font=\tiny, anchor=west] at (axis cs:%s,%d) {\texttt{%s}};"
+                       % (" ".join("(%d,%d)" % xy for xy in obs),
+                          "%.2f" % (obs[-1][0] + 0.07), obs[-1][1], g))
         return "\n".join(res)
 
-    axis_common = (r"xmin=0.4, xmax=4.4, clip=false, xtick={1,2,3}, "
-                   r"xticklabels={seed 42, seed 43, seed 44}, ymin=9.7, ymax=0.3, ytick={1,...,9}, "
-                   r"grid=major, grid style={black!10}, tick label style={font=\footnotesize}")
+    def drift(ranks):
+        """Đổi hạng giữa từng cặp split + nhóm đổi hạng mạnh nhất, từ artifact của hình nay.
+
+        exact p lap lai dung `exact_two_sided_p` cua `scripts/exact_spearman.py` -- khong
+        phat bieu thuc moi o day, de caption va `spearman.csv` khong the lech nhau.
+        """
+        try:
+            from exact_spearman import exact_two_sided_p
+        except Exception:
+            exact_two_sided_p = None
+        seeds = sorted(ranks)
+        pairs = []
+        for i in range(len(seeds) - 1):
+            for j in range(i + 1, len(seeds)):
+                a, b = seeds[i], seeds[j]
+                cmn = [g for g in GROUPS_ORDER if g in ranks[a] and g in ranks[b]]
+                if len(cmn) < 3:
+                    continue
+                ra = [int(ranks[a][g]) for g in cmn]
+                rb = [int(ranks[b][g]) for g in cmn]
+                sa = pd.Series(ra, index=cmn)
+                sb = pd.Series(rb, index=cmn)
+                rho = float(sa.corr(sb, method="spearman"))
+                shift = int((sa - sb).abs().max())
+                # Cong thuc exact dung duoc khi moi vecto la hoan vi cua 1..n (khong hang doi).
+                tie_free = (sorted(ra) == list(range(1, len(cmn) + 1))
+                            and sorted(rb) == list(range(1, len(cmn) + 1)))
+                pex = (exact_two_sided_p(len(cmn), rho)[0]
+                       if exact_two_sided_p and tie_free else None)
+                top1 = [g for g, r in zip(cmn, ra) if r == 1] == [g for g, r in zip(cmn, rb) if r == 1]
+                pairs.append({"a": a, "b": b, "rho": rho, "shift": shift,
+                              "p_exact": pex, "top1": top1})
+        spreads = [(g, [int(ranks[s][g]) for s in seeds]) for g in GROUPS_ORDER
+                   if all(g in ranks[s] for s in seeds)]
+        worst = max(spreads, key=lambda gr: max(gr[1]) - min(gr[1])) if spreads else None
+        return pairs, worst, len(spreads)
+
+    vcl = lambda x: ("%.3f" % x).replace(".", "{,}")
+
+    def vcp(x):
+        """Noi dung math-mode (khong bao $), dau phay thapphan kieu Viet; so rat nho viet khoa hoc."""
+        if x >= 1e-4:
+            return ("%.4f" % x).replace(".", "{,}")
+        mant, ex = ("%.1e" % x).split("e")
+        return "%s\\times10^{%d}" % (mant.replace(".", "{,}"), int(ex))
+
+    def drift_text(ranks):
+        pairs, worst, ngrp = drift(ranks)
+        if not pairs or worst is None:
+            return {"pairs": "chưa đủ artifact", "worst": "chưa đủ artifact",
+                    "title": "hạng \\emph{chưa xác định được}", "top1": "chưa đủ artifact"}
+        lo, hi = min(p["rho"] for p in pairs), max(p["rho"] for p in pairs)
+        flat = lo > 0.999
+        pex = [p["p_exact"] for p in pairs if p["p_exact"] is not None]
+        ntxt = (", exact $p$ lấy bằng cách liệt kê toàn bộ $%d!=%s$ thứ tự hạng"
+                % (ngrp, "{:,}".format(math.factorial(ngrp)).replace(",", "."))) if pex else ""
+        n_top = sum(1 for p in pairs if p["top1"])
+        return {
+            "pairs": "; ".join("seed %s--%s $\\rho=%s$ (lệch hạng lớn nhất %d%s)"
+                               % (p["a"], p["b"], vcl(p["rho"]), p["shift"],
+                                  (", exact $p=%s$" % vcp(p["p_exact"])
+                                   if p["p_exact"] is not None else ""))
+                               for p in pairs) + ntxt,
+            "worst": ("%d nhóm giữ nguyên hạng ở mọi split" % ngrp if flat else
+                      "nhóm dịch nhiều nhất là \\texttt{%s}: hạng %s, biên độ %d"
+                      % (worst[0], ", ".join(str(r) for r in worst[1]),
+                         max(worst[1]) - min(worst[1]))),
+            "title": ("hạng \\emph{bất biến} ($\\rho=1{,}000$)" if flat else
+                      "hạng \\emph{trôi} ($\\rho$ %s--%s)" % (vcl(lo), vcl(hi))),
+            "top1": ("%d/%d cặp split giữ cùng một nhóm ở hạng 1" % (n_top, len(pairs))),
+        }
+
+    def q_trail(group="ldrmodules"):
+        """q_BH log-loss cua `group` qua tung split, tinh lai tu summary.csv cua no."""
+        try:
+            from common import adjust_bh
+        except Exception:
+            return "Không import được `adjust_bh` -- không tính được $q_{\\mathrm{BH}}$."
+        qs = []
+        for seed, run in ABL_RUNS:
+            df = read_summary(run, "summary.csv")
+            if df is None or group not in set(df["group"]):
+                return "Chưa đủ artifact để tính chuỗi $q_{\\mathrm{BH}}$."
+            q = adjust_bh(list(df["log_loss_p_empirical"].fillna(1.0)))
+            qs.append((seed, float(q[list(df["group"]).index(group)])))
+        hit = [s for s, x in qs if x < 0.05]
+        if len(hit) == len(qs):
+            word = "đạt $q<0{,}05$ ở mọi split"
+        elif not hit:
+            word = "không split nào đạt $q<0{,}05$"
+        else:
+            word = ("chỉ đạt ở seed %s trong %d split -- $q$ là sản phẩm của hạng BH chứ không "
+                    "phải độ lớn hiệu ứng" % (", ".join(hit), len(qs)))
+        return ("Chuỗi $q_{\\mathrm{BH}}$ log-loss của \\texttt{%s} là %s, tức %s"
+                % (group, " $\\to$ ".join("seed %s $%s$" % (s, vcp(x)) for s, x in qs), word))
+
+    axis_common = (r"xmin=0.4, xmax=%.1f, clip=false, xtick={1,...,%d}, "
+                   r"xticklabels={%s}, ymin=9.7, ymax=0.3, ytick={1,...,%d}, "
+                   r"grid=major, grid style={black!10}, tick label style={font=\footnotesize}"
+                   % (len(seeds_all) + 1.4, len(seeds_all),
+                      ", ".join("seed %s" % s for s in seeds_all), len(GROUPS_ORDER)))
+    n_dir = sum(1 for s in srcs if " chieu:" in s and "-> KHOP" in s)
+    n_bad = sum(1 for s in srcs if "LECH CHIEU" in s)
+    dir_txt = ("Chiều trục được kiểm tự động từ artifact: trên %d bảng, hạng 1 luôn là nhóm có "
+               "$\\Delta$ log-loss lớn nhất." % n_dir) if not n_bad else \
+        ("\\textbf{CẢNH BÁO:} chiều hạng không khớp $\\Delta$ ở %d bảng -- không đọc hình này "
+         "cho tới khi sửa nguồn." % n_bad)
+    ut, rt = drift_text(util), drift_text(reli)
+    qt = q_trail()
     return fill(r"""
 \begin{figure}[p]\centering
 @@SRC@@
 \begin{tikzpicture}
 \begin{axis}[width=0.42\textwidth, height=7.8cm, name=A, @@COMMON@@,
   ylabel={Hạng utility (1 = quan trọng nhất)},
-  title={Utility: hạng \emph{trôi} ($\rho=0{,}800$)},
+  title={Utility: @@UTITLE@@},
   title style={font=\scriptsize}]
 @@UTIL@@
 \end{axis}
 \begin{axis}[at={(A.south east)}, anchor=south west, xshift=1.1cm,
   width=0.42\textwidth, height=7.8cm, @@COMMON@@,
   ylabel={Hạng reliance},
-  title={Reliance: hạng \emph{bất biến} ($\rho=1{,}000$)},
+  title={Reliance: @@RTITLE@@},
   title style={font=\scriptsize}]
 @@RELI@@
 \end{axis}
 \end{tikzpicture}
-\caption{Hai loại tái lập khác nhau hẳn nhau. \textbf{Bên phải}: hạng \emph{reliance} giống hệt nhau trên cả ba split ($\rho=1{,}000$, độ lệch hạng lớn nhất $=0$; exact $p$ tính bằng cách liệt kê toàn bộ $9!=362.880$ thứ tự $=5{,}5\times10^{-6}$). \textbf{Bên trái}: hạng \emph{utility} dịch chuyển ($\rho=0{,}800$, exact $p=0{,}0138$; \texttt{dlllist} đi từ hạng 7 lên hạng~3, $q_{\mathrm{BH}}$ của \texttt{ldrmodules} lật từ $0{,}1343$ xuống $0{,}0224$). Mỗi đường liền nét là một nhóm; dốc của nó chính là độ bất ổn của estimand tương ứng.}
+\caption{Hai estimand tái lập theo hai kiểu khác nhau, và mọi con số trong chú thích này do
+chương trình tính lại từ các bảng dẫn ở đầu trang chứ không chép tay. \textbf{Bên phải}:
+hạng \emph{reliance} -- @@RPAIRS@@; @@RWORST@@. \textbf{Bên trái}: hạng \emph{utility} --
+@@UPAIRS@@; @@UWORST@@; @@UTOP1@@. @@QTRAIL@@. @@DIR@@ Mỗi đường liền nét là một nhóm; dốc của
+nó chính là độ bất ổn của estimand tương ứng.}
 \end{figure}
-""", src=_src(*srcs), common=axis_common, util=lines(util), reli=lines(reli))
+""", src=_src(*srcs), common=axis_common, util=lines(util), reli=lines(reli),
+        utitle=ut["title"], rtitle=rt["title"], upairs=ut["pairs"], rpairs=rt["pairs"],
+        uworst=ut["worst"], rworst=rt["worst"], utop1=ut["top1"], qtrail=qt,
+        dir=dir_txt)
 
 
 def fig_method_heatmap() -> str:
@@ -791,20 +923,26 @@ def prov_missing(parts: list[str]) -> str:
 
 
 BOUND_RE = re.compile(r"^\s+(\S+) ctrl (\d+)/(\d+) \((\d+)s elapsed\)")
+PERM_RE = re.compile(r"^\s+perm (\S+) ctrl (\d+)/(\d+) \((\d+)s\)")
+PERM_TOTAL_RE = re.compile(r"^\[perm \S+/(\S+)/seed \d+\] ([\d.]+)s")
 
 
-def _group_boundaries(log_path: Path) -> list:
-    """(elapsed_s, so nhom tich luy) tai moi boundary TRON nhom trong log ablation."""
-    out, seen, last_grp = [], 0, None
+def _whole_groups(log_path: Path, rx) -> list:
+    """(elapsed_s, ten_nhom) tai moi boundary TRON nhom; chỉ đếm một lần khi nhóm đổi tên."""
+    out, last = [], None
     if not log_path.exists():
         return out
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        m = BOUND_RE.match(line)
-        if m and int(m.group(2)) >= int(m.group(3)) and m.group(1) != last_grp:
-            last_grp = m.group(1)
-            seen += 1
-            out.append((int(m.group(4)), seen))
+        m = rx.match(line)
+        if m and int(m.group(2)) >= int(m.group(3)) and m.group(1) != last:
+            last = m.group(1)
+            out.append((int(m.group(4)), m.group(1)))
     return out
+
+
+def _group_boundaries(log_path: Path) -> list:
+    """(elapsed_s, so nhom tich luy) dang ma hinh seed 44/43 dang dung."""
+    return [(e, i + 1) for i, (e, _) in enumerate(_whole_groups(log_path, BOUND_RE))]
 
 
 def fig_serialized_chain() -> str:
@@ -859,10 +997,92 @@ def fig_serialized_chain() -> str:
             abl_box = "%d/9 nhom, chura du boundary de ngoai suy" % ndone
     else:
         abl_box = "chura co log"
-    return r"""
+
+    def lg_box():
+        """Node LogReg: ngoai suy tu boundary tron nhom cua CHINH no, khong tu pilot 20 doi chung.
+
+        Hai cach chia (deu theo nhom / theo so feature bi block) dung chung mot tap moc nen
+        KHONG doc lap voi nhau; chung co the trung nhau bat ngo va caption phai noi ro dieu do.
+        """
+        blog = RESULTS / "group_experiments" / "ablation_logreg_v4.log"
+        summ = RESULTS / "group_experiments" / "ablation_logreg_v4" / "summary.csv"
+        bn = _whole_groups(blog, BOUND_RE)
+        if not bn:
+            return "chưa có boundary trọn nhóm trong log", "chưa có gì để ngoại suy"
+        elapsed = bn[-1][0]
+        if summ.exists():
+            return ("%d/%d nhóm\\\\ \\emph{ĐÃ CHẠY --- \\texttt{summary.csv}}"
+                    % (len(bn), len(GROUPS_ORDER))), \
+                   ("Node LogReg là số đo thật %s\\,s từ artifact của chính nó, không còn là ước lượng."
+                    % fmt(elapsed))
+        sref = read_summary("ablation_v4", "summary.csv")
+        feats = dict(zip(sref["group"], sref["n_features"])) if sref is not None else {}
+        names = [g for _, g in bn]
+        est = [("chia đều theo nhóm", elapsed / float(len(bn)) * len(GROUPS_ORDER))]
+        if feats and all(g in feats for g in names):
+            rate = elapsed / float(sum(feats[g] for g in names))
+            est.append(("chia theo feature", elapsed + rate * sum(
+                v for g, v in feats.items() if g not in names)))
+        est.sort(key=lambda kv: kv[1])
+        (nlo, lo), (nhi, hi) = est[0], est[-1]
+        vh = lambda x: ("%.1f" % (x / 3600.0)).replace(".", ",")
+        hspan = ("%s--%s\\,h" % (vh(lo), vh(hi)) if hi > 1.02 * lo else "%s\\,h" % vh(hi))
+        agree = hi <= 1.02 * lo
+        m_done = (sum(feats[g] for g in names) / float(len(bn))) if feats else 0.0
+        m_all = (sum(feats.values()) / float(len(GROUPS_ORDER))) if feats else 0.0
+        why = (("chúng trùng nhau ở đây chỉ vì %d nhóm đã xong trung bình %.1f feature, sát mức "
+                 "%.1f của cả chín nhóm" % (len(bn), m_done, m_all)).replace(".", ",")
+               if agree else
+               "chúng lệch nhau %.0f\\,%% --- chỉ số lớn hơn được duyệt làm ETA" % ((hi / lo - 1.0) * 100))
+        return ("%d/%d nhóm\\\\ $\\approx$ %s, còn $\\approx$ %s\\,h"
+                % (len(bn), len(GROUPS_ORDER), hspan, vh(hi - elapsed))), \
+               ("Node LogReg (%d/%d nhóm, %s\\,s đã đo) ngoại suy từ %d boundary trọn nhóm của chính "
+                "nó: %s cho %s\\,h, %s cho %s\\,h; %s. Hai cách chia chỉ dùng chung một tập mốc đo "
+                "nên không độc lập với nhau."
+                % (len(bn), len(GROUPS_ORDER), fmt(elapsed), len(bn), nlo, vh(lo), nhi, vh(hi), why))
+
+    lg_box_txt, lg_note = lg_box()
+
+    def perm_lg_box():
+        """Node permutation LogReg: co boundary cua chinh run thi dung; khong thi ngoai suy
+        tu dong line logreg trong importance_v2.log va nhan ro la ngoai suy.
+        """
+        base = RESULTS / "group_experiments"
+        summ = base / "importance_v3_logreg" / "permutation_summary.csv"
+        own = base / "importance_v3_logreg.log"
+        ng = len(GROUPS_ORDER)
+        if summ.exists():
+            bn = _whole_groups(own, PERM_RE)
+            return ("ĐÃ CHẠY\\\\ \\texttt{permutation\\_summary.csv}",
+                    "Node permutation LogReg là số đo thật từ artifact của chính nó (%s\\,s đã đo)."
+                    % (fmt(bn[-1][0]) if bn else "chưa đọc được boundary"))
+        bn = _whole_groups(own, PERM_RE)
+        if bn:
+            elapsed, nd = bn[-1][0], len(bn)
+            left = max(0.0, elapsed / nd * ng - elapsed)
+            return ("%d/%d nhóm\\\\ còn $\\approx$ %.0f\\,phút" % (nd, ng, left / 60.0),
+                    ("Node permutation LogReg ngoại suy từ %d boundary trọn nhóm của chính nó "
+                     "(%s\\,s đã đo)." % (nd, fmt(elapsed))))
+        v2 = base / "importance_v2.log"
+        secs = [float(m.group(2)) for line in
+                (v2.read_text(encoding="utf-8", errors="replace").splitlines() if v2.exists() else [])
+                for m in [PERM_TOTAL_RE.match(line)] if m and m.group(1) == "logreg"]
+        if not secs:
+            return ("chưa có log riêng\\\\ và chưa đọc được mốc nền",
+                    "Node permutation LogReg chưa có số nào để tin.")
+        est = sum(secs) * (200.0 / 20.0) / 60.0
+        return ("$\\approx$ %.0f\\, phút\\\\ (ngoại suy)" % est,
+                ("Node permutation LogReg là \\emph{ngoại suy tuyến tính}: \\texttt{importance\\_v2.log} "
+                 "ghi %s\\,s cho toàn run 20 đối chứng, nhân 10 lên 200 đối chứng; run này chưa có "
+                 "boundary riêng nên chưa kiểm chứng được."
+                 % ("%.1f" % sum(secs)).replace(".", ",")))
+
+    perm_lg_txt, perm_lg_note = perm_lg_box()
+    return (r"""
 \begin{figure}[t]\centering
 """ + _src("scripts/chain_after.sh", "watchdog = results/group_experiments/watchdog.log",
-           "thoi gian do tu log/artifact cua tung run") + r"""
+           "boundary = results/group_experiments/ablation_xgb_s43.log + ablation_xgb_s44.log + ablation_logreg_v4.log",
+           "nen ngoai suy permutation LogReg = results/group_experiments/importance_v2.log") + r"""
 \begin{tikzpicture}[
   job/.style={draw=black!55, rounded corners=2pt, align=center, font=\scriptsize,
               inner sep=4pt, minimum width=2.85cm, fill=black!4},
@@ -872,8 +1092,8 @@ def fig_serialized_chain() -> str:
 ]
 \node[job, fill=teal!10] (p) at (0,0) {Permutation seed 44\\ \texttt{importance\_v3\_s44}\\ 11.342\,s $\approx$ 3,15\,h\\ \emph{ĐÃ CHẠY, verifier PASS}};
 \node[job] (a) at (4.2,0) {Ablation seed 44\\ \texttt{ablation\_xgb\_s44}\\ @@ABL@@\\ \emph{@@STATE@@}};
-\node[job] (l) at (8.4,0) {Ablation LogReg\\ \texttt{ablation\_logreg\_v4}\\ $\approx$ 2,7--3,0\,h};
-\node[job] (i) at (12.2,0) {Permutation LogReg\\ \texttt{importance\_v3\_logreg}\\ $\approx$ 7--12\,phút};
+\node[job] (l) at (8.4,0) {Ablation LogReg\\ \texttt{ablation\_logreg\_v4}\\ @@LREG@@};
+\node[job] (i) at (12.2,0) {Permutation LogReg\\ \texttt{importance\_v3\_logreg}\\ @@PERMLG@@};
 \draw[arr] (p) -- (a); \draw[arr] (a) -- (l); \draw[arr] (l) -- (i);
 \node[gate] (g1) at (2.1,-1.5) {\,RAM};
 \node[gate] (g2) at (6.3,-1.5) {\,RAM};
@@ -894,13 +1114,18 @@ def fig_serialized_chain() -> str:
    (925\,s/nhóm) --- gấp $\sim$3 lần toàn bộ phần còn lại mà không đổi được kết luận nào đã ghi,
    chỉ thêm một dòng model ở sàn $p$ thấp.};
 \end{tikzpicture}
-\caption{Chuỗi thí nghiệm nối tiếp trên máy 4{,}9\,GB và cổng bộ nhớ giữa các job. Mọi số giờ
-trên hình do chính generator đọc từ log, không gõ tay. Chuỗi tỉ lệ tích lũy seed\,44/seed\,43
+\caption{Chuỗi thí nghiệm nối tiếp trên máy 4{,}9\,GB và cổng bộ nhớ giữa các job. Node ablation
+seed\,44 và hai node LogReg lấy số trực tiếp từ boundary trọn nhóm trong log của chính từng run
+(không gõ tay): @@LREGNOTE@@ @@PERMNOTE@@ Node ngoài cùng bên trái là số đo đã chốt của một run
+đã kết thúc, kèm verifier PASS.
+Chuỗi tỉ lệ tích lũy seed\,44/seed\,43
 tại các boundary trọn nhóm là @@TRAIL@@; @@CAVEAT@@. Không được ngoại suy từ một mốc
 \emph{giữa} nhóm (ví dụ \texttt{ctrl 100/200}) --- ước lượng đầu tiên của chính run này
 (~21:35) đã mắc lỗi đó và bị loại; các ước lượng sau bị loại vì lấy ở boundary quá sớm.}
 \end{figure}
 """.replace("@@ABL@@", abl_box).replace("@@STATE@@", state).replace("@@TRAIL@@", trail or "chưa có boundary").replace("@@CAVEAT@@", caveat)
+        .replace("@@LREG@@", lg_box_txt).replace("@@LREGNOTE@@", lg_note)
+        .replace("@@PERMLG@@", perm_lg_txt).replace("@@PERMNOTE@@", perm_lg_note))
 
 
 FIGURES = [
@@ -1093,10 +1318,21 @@ def build(out: Path, reports: list[str], do_check: bool) -> int:
         encoding="utf-8")
 
     print("latex/: %d báo cáo -> sec/*.tex, %d hình, main.tex" % (len(inputs), len(generated)))
+    broken = []
     for name in generated:
         head = (fig / ("%s.tex" % name)).read_text(encoding="utf-8")
         flag = "MISSING" if "MISSING HINH" in head or "% MISSING" in head else "ok"
+        if flag == "MISSING":
+            broken.append(name)
         print("   %-28s %s" % (name, flag))
+    if broken:
+        # Mot hinh loi bi im lang thanh xuong cat placeholder 1 dong, PDF van "OK".
+        # Khong duoc phep bo qua: do la bang chung da mat, khong phai la thieu bang.
+        print("  BLOCKED: %d hình không sinh ra được" % len(broken))
+        for name in broken:
+            print("     %s: %s" % (name, (fig / ("%s.tex" % name))
+                                   .read_text(encoding="utf-8").splitlines()[0][:160]))
+        return 1
     if missing:
         print("  cảnh cáo, bỏ qua vì không tồn tại:", ", ".join(missing))
 
