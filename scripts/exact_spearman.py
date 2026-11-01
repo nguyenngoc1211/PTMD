@@ -6,11 +6,18 @@ this script reports both and lets the write-up state which one is quoted.
 
 Value columns must be scores where HIGHER = more important. Do not feed the
 `rank` column: it is inverse-scaled -- rank 1 is the group with the LARGEST delta
-(checked against all five `permutation_summary.csv` on disk: rank 1 = `handles` =
-max delta in every one). `compare()` re-ranks descending, so a rank column inverts
-`top1_match`, and pairing a rank column with a delta column flips the sign of rho.
+(checked against the five `permutation_summary.csv` on disk as of 2026-11-02; there
+the `rank` column restarts per model, and rank 1 = `handles` = max delta in every
+one). `compare()` re-ranks descending, so a rank column inverts `top1_match`, and
+pairing a rank column with a delta column flips the sign of rho.
 Rank-vs-rank across two splits is safe (both flip), which is why the drift figure
 can use the rank columns while this script is fed deltas.
+
+Some summaries stack several models in one table -- `importance_v2/permutation_summary.csv`
+is 36 rows over 4 models and 9 groups -- which leaves a duplicated `group` index, and
+pandas then pairs the two series by occurrence order rather than by group. Filter with
+`--model-a`/`--model-b`; `load_scores` refuses a duplicated index instead of returning a
+rho that still looks plausible.
 """
 
 from __future__ import annotations
@@ -72,9 +79,25 @@ def compare(name_a: str, a: pd.Series, name_b: str, b: pd.Series) -> dict:
     }
 
 
-def load_scores(path: str, group_col: str, value_col: str) -> pd.Series:
+def load_scores(path: str, group_col: str, value_col: str, model: str = "") -> pd.Series:
     df = pd.read_csv(path)
-    return df.set_index(group_col)[value_col]
+    if model:
+        if "model" not in df.columns:
+            raise SystemExit(f"{path}: --model given but the file has no 'model' column")
+        df = df[df["model"] == model]
+        if df.empty:
+            raise SystemExit(f"{path}: no rows with model={model}; present: {models_in(df)}")
+    s = df.set_index(group_col)[value_col]
+    if s.index.has_duplicates:
+        raise SystemExit(
+            f"{path}: {group_col} is not unique ({len(s)} rows, {s.index.nunique()} labels, "
+            f"{models_in(df)}). With duplicate labels pandas pairs the two series by occurrence "
+            "order, not by group, so pick one model with --model-a/--model-b.")
+    return s
+
+
+def models_in(df: pd.DataFrame) -> str:
+    return "no model column" if "model" not in df.columns else str(sorted(df["model"].unique()))
 
 
 def main() -> None:
@@ -84,12 +107,15 @@ def main() -> None:
     ap.add_argument("csv_b")
     ap.add_argument("col_b")
     ap.add_argument("--group-col", default="group")
+    ap.add_argument("--model-a", default="", help="filter csv_a to one value of its 'model' column")
+    ap.add_argument("--model-b", default="", help="filter csv_b to one value of its 'model' column")
     args = ap.parse_args()
 
-    label_a = f"{args.col_a}@{args.csv_a.split('/')[-2]}"
-    label_b = f"{args.col_b}@{args.csv_b.split('/')[-2]}"
-    a = load_scores(args.csv_a, args.group_col, args.col_a)
-    b = load_scores(args.csv_b, args.group_col, args.col_b)
+    suffix = lambda m: f"/{m}" if m else ""
+    label_a = f"{args.col_a}@{args.csv_a.split('/')[-2]}{suffix(args.model_a)}"
+    label_b = f"{args.col_b}@{args.csv_b.split('/')[-2]}{suffix(args.model_b)}"
+    a = load_scores(args.csv_a, args.group_col, args.col_a, args.model_a)
+    b = load_scores(args.csv_b, args.group_col, args.col_b, args.model_b)
     row = compare(label_a, a, label_b, b)
     for key, value in row.items():
         print(f"{key}: {value}")
