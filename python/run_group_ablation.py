@@ -41,7 +41,7 @@ Outputs (new tree, nothing existing is overwritten):
     results/group_experiments/ablation/substitution.csv        (optional)
     results/group_experiments/ablation/figures/*.png
     results/group_experiments/ablation/manifest.json
-    report/group_ablation.md
+    report/group_ablation_<out-name>.md   (or --report-name)
 """
 from __future__ import annotations
 
@@ -571,7 +571,7 @@ def write_report(summary, rankings, deltas, correlation, tasks, args, block_tabl
     lines.append('- Δ≈0 **không** được viết thành "nhóm vô ích"; phải viết "thông tin trong '
                  'nhóm có thể thay thế bởi nhóm khác", kèm bằng chứng block-out ở mục 5.\n')
     (ROOT / 'report').mkdir(exist_ok=True)
-    name = getattr(args, 'report_name', None) or 'group_ablation.md'
+    name = getattr(args, 'report_name', None) or f'group_ablation_{args.out_name}.md'
     (ROOT / 'report' / name).write_text('\n'.join(lines))
     print(f'Generated report/{name}', flush=True)
 
