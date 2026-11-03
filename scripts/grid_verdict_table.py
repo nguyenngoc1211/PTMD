@@ -119,7 +119,7 @@ def main():
             scores[('attribution', model, task, int(seed))] = g.set_index('group')['mean_abs_phi']
 
     print(f'cell verdicts  (BH over 9 groups on log-loss, alpha={args.alpha}, focus={args.focus})')
-    tally = dict(total=0, passed=0, rank1=0, grid=0, grid_passed=0)
+    tally = dict(total=0, passed=0, rank1=0, grid=0, grid_passed=0, fam=0, fam_passed=0)
     for key in sorted(scores, key=lambda k: (k[0], k[1], k[2], k[3])):
         if key not in qmap:
             continue
@@ -128,6 +128,9 @@ def main():
         tally['total'] += 1
         tally['rank1'] += int(r[args.focus] == 1)
         tally['passed'] += int(q[args.focus] < args.alpha)
+        if key[2] == 'family16':
+            tally['fam'] += 1
+            tally['fam_passed'] += int(q[args.focus] < args.alpha)
         if key[2] == 'family16' and key[1] in ('xgboost', 'logreg'):
             tally['grid'] += 1
             tally['grid_passed'] += int(q[args.focus] < args.alpha)
@@ -136,8 +139,9 @@ def main():
               f'delta={scores[key][args.focus]:+.4f}  winners={winners or "-"}')
     print(f"\n{args.focus}: {tally['passed']}/{tally['total']} cells pass threshold, "
           f"{tally['rank1']}/{tally['total']} rank 1, locked 2x2x3 grid "
-          f"{tally['grid_passed']}/{tally['grid']} (extension cells outside the grid are "
-          f"counted only in the first fraction)")
+          f"{tally['grid_passed']}/{tally['grid']}, all family16 interventional cells "
+          f"{tally['fam_passed']}/{tally['fam']} (only the last fraction counts extension "
+          f"cells; a cell whose artifact is missing is absent from all four fractions)")
 
     print('\nrho: same task, exactly one dimension changed at a time')
     for estimand in ('reliance', 'utility', 'attribution'):
@@ -156,7 +160,8 @@ def main():
             else:
                 continue
             r = compare(f'{a[1]}/{a[3]}', scores[a], f'{b[1]}/{b[3]}', scores[b])
-            print(f'  {estimand:11s} {kind:11s} {a[2]:8s} {a[1]:8s}~{b[1]:8s} '
+            print(f'  {estimand:11s} {kind:11s} {a[2]:8s} '
+                  f'{a[1]}:s{a[3]}~{b[1]}:s{b[3]} '
                   f'rho={r["rho"]:.4f} exact_p={r["p_exact_all_orderings"]:.6f} '
                   f'top1={"yes" if r["top1_match"] else "no "} maxshift={r["max_rank_shift"]}')
 
