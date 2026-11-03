@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import math
 import time
@@ -72,6 +73,9 @@ from group_protocol import (GROUPS, MODELS, TASKS, group_map, load_tasks,
 from split_manager import load_locked
 
 OUT = ROOT / 'results' / 'group_experiments' / 'importance'
+
+RUNS_COLUMNS = ['task', 'model', 'seed', 'condition', 'group', 'control_index',
+                'delta_log_loss', 'delta_log_loss_sd', 'delta_macro_f1']
 
 
 def fit(task, train, columns, model_name, seed):
@@ -93,40 +97,75 @@ def _row_logloss(probability, y):
     return -np.log(p)
 
 
-def permutation(task, model, index, test, groups, repeats, seed, controls):
-    """Jointly permute each group block; return per-row and aggregate effects."""
+def permutation(task, model, index, test, groups, repeats, seed, controls,
+                resume=None, on_block=None):
+    """Jointly permute each group block; return per-row and aggregate effects.
+
+    ``resume`` maps a group to ``(observed_done, done_control_indices)`` and
+    ``on_block`` is called with each newly completed block, so the caller can
+    append one row per block instead of one per group. Block granularity is the
+    point: a group costs ``repeats * (1 + controls)`` scorings, which at 200
+    controls is about 1,7 hours on HistGB, so a group-level checkpoint would
+    still throw away 1,7 hours every time the WSL VM is recycled. With blocks the
+    unit of lost work is one control, about 30 seconds.
+
+    A skipped block still consumes its ``repeats`` draws from the shared ``rng``.
+    The group block and every control block draw from one stream in group order,
+    so without the replay a resumed cell would generate different permutations
+    than the same cell run uninterrupted, and its numbers would not be comparable
+    with the cells that never resumed.
+    """
     X = task.frame[task.features].to_numpy(dtype=np.float64)
     X_test = X[np.ix_(test, index)]
     y_test = task.y[test]
     base_loss = _row_logloss(model.predict_proba(X_test), y_test)
     base = score(model, X_test, y_test, task)
+    n = len(X_test)
     rng = np.random.default_rng(seed)
+    resume = resume or {}
+
+    def _emit(row, column=None):
+        frame = pd.DataFrame([row])
+        if on_block is not None:
+            on_block(frame, None if column is None else pd.DataFrame({row['group']: column}))
+
+    def _replay(count):
+        for _ in range(count):
+            rng.permutation(n)
+
     t0 = time.time()
-    rows = {}
-    runs = []
+    rows, runs = {}, []
     for group, members in groups.items():
         local = [index.index(task.features.index(c)) for c in members]
-        effects = []
-        for _ in range(repeats):
-            permuted = X_test.copy()
-            order = rng.permutation(len(X_test))
-            permuted[:, local] = X_test[np.ix_(order, local)]
-            loss = _row_logloss(model.predict_proba(permuted), y_test)
-            effects.append(loss - base_loss)
-        mean_effect = np.mean(effects, axis=0)
-        rows[group] = mean_effect
-        runs.append(dict(condition='permute_group', group=group, control_index=-1,
-                         delta_log_loss=float(mean_effect.mean()),
-                         delta_log_loss_sd=float(np.std(np.mean(effects, axis=1), ddof=1))
-                         if repeats > 1 else float('nan')))
+        observed_done, control_done = resume.get(group, (False, frozenset()))
+        if observed_done:
+            _replay(repeats)
+        else:
+            effects = []
+            for _ in range(repeats):
+                permuted = X_test.copy()
+                order = rng.permutation(n)
+                permuted[:, local] = X_test[np.ix_(order, local)]
+                loss = _row_logloss(model.predict_proba(permuted), y_test)
+                effects.append(loss - base_loss)
+            mean_effect = np.mean(effects, axis=0)
+            rows[group] = mean_effect
+            runs.append(dict(condition='permute_group', group=group, control_index=-1,
+                             delta_log_loss=float(mean_effect.mean()),
+                             delta_log_loss_sd=float(np.std(np.mean(effects, axis=1), ddof=1))
+                             if repeats > 1 else float('nan')))
+            _emit(runs[-1], rows[group])
         for k, subset in enumerate(random_feature_sets(
                 task.features, len(members), controls,
                 seed * 7919 + GROUPS.index(group), exclude=members)):
+            if k in control_done:
+                _replay(repeats)
+                continue
             local_random = [index.index(task.features.index(c)) for c in subset]
             effects = []
             for _ in range(repeats):
                 permuted = X_test.copy()
-                order = rng.permutation(len(X_test))
+                order = rng.permutation(n)
                 permuted[:, local_random] = X_test[np.ix_(order, local_random)]
                 loss = _row_logloss(model.predict_proba(permuted), y_test)
                 effects.append(loss - base_loss)
@@ -136,6 +175,7 @@ def permutation(task, model, index, test, groups, repeats, seed, controls):
                              delta_log_loss_sd=float(np.std(np.mean(effects, axis=1), ddof=1))
                              if repeats > 1 else float('nan'),
                              delta_macro_f1=float('nan')))
+            _emit(runs[-1])
             if (k + 1) % 25 == 0 or k + 1 == controls:
                 print(f'  perm {group} ctrl {k + 1}/{controls} '
                       f'({time.time() - t0:.0f}s)', flush=True)
@@ -216,6 +256,94 @@ def _output(model, X, task, y):
     return np.log(p)
 
 
+def _read_runs(path, required=('task', 'model', 'seed', 'group', 'condition',
+                               'delta_log_loss')):
+    """Read permutation_runs.csv, dropping a final half-written line.
+
+    A checkpoint append can be interrupted between the bytes of the last row.
+    pandas then fills the missing fields with NaN instead of raising, so a torn
+    tail would silently shrink a control block. A body that does not end in a
+    newline is torn by definition, so the last line is dropped before parsing.
+    """
+    raw = path.read_text()
+    if raw and not raw.endswith('\n'):
+        raw = raw.rstrip('\n').rsplit('\n', 1)[0] + '\n'
+    # round_trip, not the default parser: pandas' fast float parser is off by an
+    # ulp on some values, and every checkpoint resume re-reads and re-writes the
+    # rows it kept, so the default would let the stored numbers drift run after
+    # run. This is also the explanation for the 4.4e-16 rewrite seen under
+    # --reuse-runs (REPRODUCIBILITY 4.21).
+    table = pd.read_csv(io.StringIO(raw), float_precision='round_trip')
+    missing = [c for c in required if c not in table.columns]
+    if missing:
+        raise SystemExit(f'{path}: missing columns {missing}; refusing to resume '
+                         f'onto a table with an unexpected schema')
+    table['seed'] = table.seed.astype(int)
+    return table
+
+
+def _append_runs(path, frame):
+    """Append one completed block, always under the full nine-column schema.
+
+    The observed block has no delta_macro_f1 key, so writing whichever columns
+    the first frame happens to carry would create a header one column short and
+    every later control row would overflow it. The reference cells written without
+    --checkpoint all carry RUNS_COLUMNS, so that is the schema appended to.
+    """
+    frame = frame.reindex(columns=RUNS_COLUMNS)
+    if path.exists():
+        frame.to_csv(path, mode='a', header=False, index=False)
+    else:
+        frame.to_csv(path, index=False)
+
+
+def _usable_rows(table, task, model, seed, controls):
+    """Rows of one cell that a resume may trust.
+
+    Null rows outside ``[0, controls)`` are dropped rather than reused: a rerun
+    under a smaller --controls would otherwise keep blocks that the fresh
+    appends cannot produce, and a duplicate control index would silently widen
+    the null set p is computed from. drop_duplicates(keep='first') is insurance;
+    the torn-tail guard in _read_runs is what normally prevents the duplicate.
+    """
+    sel = table[(table.task == task) & (table.model == model) & (table.seed == seed)]
+    observed = sel[sel.condition == 'permute_group'].drop_duplicates(
+        subset=['group'], keep='first')
+    null = sel[sel.condition == 'permute_random']
+    null = null[(null.control_index >= 0) & (null.control_index < controls)]
+    null = null.drop_duplicates(subset=['group', 'control_index'], keep='first')
+    return pd.concat([observed, null])
+
+
+def _resume_state(sel):
+    """Map each group to (observed_done, frozenset of control indices present)."""
+    state = {}
+    for group, block in sel.groupby('group'):
+        observed = bool((block.condition == 'permute_group').any())
+        idx = frozenset(int(i) for i in
+                        block.loc[block.condition == 'permute_random', 'control_index'])
+        state[str(group)] = (observed, idx)
+    return state
+
+
+def _cell_complete(state, groups, controls):
+    return len(state) == len(groups) and all(
+        observed and len(idx) == controls
+        for observed, idx in state.values())
+
+
+def _row_means_from_disk(path, task, model, seed):
+    """Recover per-group row-effect summaries from a checkpointed rows file."""
+    if not path.exists():
+        return []
+    table = pd.read_csv(path, float_precision='round_trip')
+    skip = {'test_position', 'task', 'model', 'seed'}
+    return [dict(task=task, model=model, seed=seed, group=group,
+                 mean_row_effect=float(table[group].mean()),
+                 median_row_effect=float(table[group].median()))
+            for group in table.columns if group not in skip]
+
+
 def run(args):
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / 'figures').mkdir(exist_ok=True)
@@ -223,13 +351,36 @@ def run(args):
     methods = [m.strip() for m in args.methods.split(',') if m.strip()]
     permutation_rows, permutation_runs, shapley_rows = [], [], []
     checks = []
+    runs_path = OUT / 'permutation_runs.csv'
 
     if args.reuse_runs:
-        path = OUT / 'permutation_runs.csv'
-        if not path.exists():
-            raise SystemExit(f'--reuse-runs: {path} does not exist')
-        permutation_runs.append(pd.read_csv(path))
+        if not runs_path.exists():
+            raise SystemExit(f'--reuse-runs: {runs_path} does not exist')
+        permutation_runs.append(_read_runs(runs_path))
         tasks = {}
+
+    # Checkpoint mode appends one row to runs.csv per completed block. Before
+    # any work starts the file is compacted: rows for cells this invocation owns
+    # are reduced to the ones a resume can trust, so a rerun under a different
+    # --controls or a duplicated append cannot poison the null block.
+    checkpoint = args.checkpoint and 'permutation' in methods and not args.reuse_runs
+    resume_map = {}
+    if checkpoint and runs_path.exists():
+        table = _read_runs(runs_path).reset_index(drop=True)
+        targets = sorted({(t, m, int(s)) for t in tasks for m in args.models
+                          for s in args.seeds})
+        keys = list(zip(table.task, table.model, table.seed))
+        keep = np.array([k not in set(targets) for k in keys], dtype=bool)
+        for task_name, model_name, seed in targets:
+            usable = _usable_rows(table, task_name, model_name, seed, args.controls)
+            keep[usable.index.to_numpy()] = True
+            resume_map[(task_name, model_name, seed)] = _resume_state(usable)
+        dropped = int((~keep).sum())
+        tmp = runs_path.with_name('permutation_runs.tmp.csv')
+        table[keep].to_csv(tmp, index=False)
+        tmp.replace(runs_path)
+        print(f'[checkpoint] {runs_path.name}: kept {int(keep.sum())} rows, '
+              f'dropped {dropped} stale or duplicate', flush=True)
 
     for task_name, task in tasks.items():
         groups = group_map(task.features)
@@ -239,25 +390,60 @@ def run(args):
             else:
                 train, test = task.split(seed)
             for model_name in args.models:
+                state = resume_map.get((task_name, model_name, seed), {})
+                rows_file = OUT / f'permutation_rows_{task_name}_{model_name}_{seed}.csv'
+                if checkpoint and _cell_complete(state, groups, args.controls):
+                    print(f'[perm {task_name}/{model_name}/seed {seed}] already '
+                          f'checkpointed, skipped ({len(state)} groups)', flush=True)
+                    permutation_rows.extend(
+                        _row_means_from_disk(rows_file, task_name, model_name, seed))
+                    continue
                 model, index = fit(task, train, task.features, model_name, seed)
                 if 'permutation' in methods:
                     start = time.time()
-                    runs, rows, base = permutation(task, model, index, test, groups,
-                                                   args.permutation_repeats, seed,
-                                                   args.controls)
-                    runs.insert(0, 'task', task_name)
-                    runs.insert(1, 'model', model_name)
-                    runs.insert(2, 'seed', seed)
-                    permutation_runs.append(runs)
-                    for group, values in rows.items():
-                        permutation_rows.append(dict(task=task_name, model=model_name,
-                                                     seed=seed, group=group,
-                                                     mean_row_effect=float(values.mean()),
-                                                     median_row_effect=float(np.median(values))))
-                    rows.assign(task=task_name, model=model_name, seed=seed,
-                                test_position=test).to_csv(
-                        OUT / f'permutation_rows_{task_name}_{model_name}_{seed}.csv',
-                        index=False)
+
+                    def _checkpoint_block(frame, row_effects,
+                                          task_name=task_name, model_name=model_name):
+                        frame.insert(0, 'task', task_name)
+                        frame.insert(1, 'model', model_name)
+                        frame.insert(2, 'seed', seed)
+                        _append_runs(runs_path, frame)
+                        if row_effects is None:
+                            return
+                        if rows_file.exists():
+                            row_effects.to_csv(rows_file, mode='a', header=False,
+                                               index=False)
+                        else:
+                            row_effects.assign(test_position=test).to_csv(
+                                rows_file, index=False)
+                        print(f'  [checkpoint] {task_name}/{model_name}/seed {seed} '
+                              f'{frame.group.iloc[0]} observed -> {runs_path.name}',
+                              flush=True)
+
+                    runs, rows, base = permutation(
+                        task, model, index, test, groups, args.permutation_repeats,
+                        seed, args.controls, resume=state,
+                        on_block=_checkpoint_block if checkpoint else None)
+                    if checkpoint:
+                        # rows_file now holds every group of the cell, resumed
+                        # ones included, so the summary is read back rather than
+                        # rebuilt from the groups computed in this invocation
+                        permutation_rows.extend(
+                            _row_means_from_disk(rows_file, task_name, model_name,
+                                                 seed))
+                    else:
+                        runs.insert(0, 'task', task_name)
+                        runs.insert(1, 'model', model_name)
+                        runs.insert(2, 'seed', seed)
+                        permutation_runs.append(runs)
+                        for group, values in rows.items():
+                            permutation_rows.append(dict(
+                                task=task_name, model=model_name, seed=seed,
+                                group=group,
+                                mean_row_effect=float(values.mean()),
+                                median_row_effect=float(np.median(values))))
+                        rows.assign(task=task_name, model=model_name, seed=seed,
+                                    test_position=test).to_csv(rows_file, index=False)
                     print(f'[perm {task_name}/{model_name}/seed {seed}] '
                           f'{time.time() - start:.1f}s', flush=True)
                 if 'shapley' in methods and model_name in args.shapley_models:
@@ -279,9 +465,17 @@ def run(args):
                           f'additivity_err={check["additivity_max_abs_error"]:.2e}',
                           flush=True)
 
-    if permutation_runs:
+    if checkpoint and runs_path.exists():
+        # the file is the single source of truth here: it holds the rows appended
+        # by this invocation plus the resumed ones, and rewriting it from memory
+        # would drop cells that were never part of this run
+        runs = _read_runs(runs_path)
+    elif permutation_runs:
         runs = pd.concat(permutation_runs, ignore_index=True)
         runs.to_csv(OUT / 'permutation_runs.csv', index=False)
+    else:
+        runs = pd.DataFrame()
+    if not runs.empty:
         summary = summarise_permutation(runs)
         summary.to_csv(OUT / 'permutation_summary.csv', index=False)
         if permutation_rows:
@@ -337,7 +531,7 @@ def build_rankings(ablation_name='ablation'):
     frames = []
     path = OUT / 'permutation_runs.csv'
     if path.exists():
-        runs = pd.read_csv(path)
+        runs = _read_runs(path)
         observed = runs[runs.condition == 'permute_group']
         for (task, model, seed), block in observed.groupby(['task', 'model', 'seed']):
             ranked = rank_values(block.delta_log_loss.to_numpy(), block.group)
@@ -490,6 +684,7 @@ def write_manifest(args):
         permutation_repeats=args.permutation_repeats,
         permutation_controls=args.controls,
         reused_runs=bool(args.reuse_runs),
+        checkpoint=bool(args.checkpoint),
         shapley_models=args.shapley_models,
         shapley_explain=args.shapley_explain,
         shapley_background=args.shapley_background,
@@ -521,6 +716,11 @@ def main():
     parser.add_argument('--reuse-runs', action='store_true',
                         help='recompute summary/report from existing '
                              'permutation_runs.csv without refitting or permuting')
+    parser.add_argument('--checkpoint', action='store_true',
+                        help='append permutation_runs.csv after every block (one '
+                             'group permutation or one matched control) and resume '
+                             'past blocks already on disk, replaying the shared '
+                             'rng so a resumed cell equals an uninterrupted one')
     args = parser.parse_args()
     global OUT
     OUT = ROOT / 'results' / 'group_experiments' / args.out_name
