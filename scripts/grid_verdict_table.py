@@ -11,6 +11,11 @@ Rho uses `exact_spearman.compare`, which enumerates all 9! orderings, never
 scipy's t-approximation: the reliance cross-model pair sits at rho 0.683, where the
 two rules disagree (exact 0.05032 versus asymptotic 0.0424).
 
+This script only reads. A test row must never be written under the results tree: a
+sandbox made by symlinking the real artifact directories is not isolation, since
+`mkdir -p` and `to_csv` both follow the link into the live cell (af06e41's claim that a
+synthetic cell was written outside the tree was wrong; see REPRODUCIBILITY 4.21).
+
 Run from the repository root: `python3 scripts/grid_verdict_table.py`.
 """
 from __future__ import annotations
