@@ -55,6 +55,8 @@ INTERVENTIONAL = {
                                             'log_loss_delta_mean', 'log_loss_p_empirical'),
     ('utility', 'histgb', 'family16', 42): ('ablation_histgb_v4', 'summary.csv',
                                             'log_loss_delta_mean', 'log_loss_p_empirical'),
+    ('reliance', 'histgb', 'family16', 42): ('importance_v3_histgb', 'permutation_summary.csv',
+                                             'delta_log_loss_mean', 'p_empirical'),
     ('reliance', 'xgboost', 'binary', 42): ('importance_v3_binary_type4', 'permutation_summary.csv',
                                             'delta_log_loss_mean', 'p_empirical'),
     ('reliance', 'xgboost', 'type4', 42): ('importance_v3_binary_type4', 'permutation_summary.csv',
@@ -67,6 +69,11 @@ INTERVENTIONAL = {
 
 SHAPLEY_DIRS = ['importance_shapley', 'importance_shapley_s43_44', 'importance_shapley_logreg',
                 'importance_shapley_logreg_s43_44', 'importance_shapley_s42_type4']
+
+# Cells whose artifact is still being written. A missing file is expected here and only
+# here, so a typo in the path of a finished cell still raises instead of quietly shrinking
+# every tally. Empty this set once the run lands and the tallies become final.
+PENDING = {('reliance', 'histgb', 'family16', 42)}
 
 WIDTH = {'modules': 1, 'dlllist': 2, 'callbacks': 3, 'malfind': 4, 'pslist': 5,
          'ldrmodules': 6, 'svcscan': 7, 'handles': 13, 'psxview': 14}
@@ -83,8 +90,12 @@ def bh(pvals):
     return out
 
 
-def load_table(folder, name, task, model, expected=9):
+def load_table(folder, name, task, model, expected=9, allow_missing=False):
     path = os.path.join(ROOT, folder, name)
+    if not os.path.exists(path):
+        if allow_missing:
+            return None
+        raise SystemExit(f'{path}: artifact missing and the cell is not in PENDING')
     df = pd.read_csv(path)
     df = df[df['task'] == task]
     if 'model' in df.columns:
@@ -100,6 +111,44 @@ def label(key):
     return f'{key[0]:9s} {key[1]:8s} {key[2]:8s} s{key[3]}'
 
 
+def prereg(scores, qmap, rmap, alpha):
+    """H1-H5 of REPRODUCIBILITY 4.20, cut points written before the artifact existed.
+
+    Kept in the same file as the tallies so the verdict rules cannot be edited after the
+    numbers are on disk without the diff being visible.
+    """
+    key = ('reliance', 'histgb', 'family16', 42)
+    print('\npre-registered H1-H5, histgb reliance family16 s42')
+    if key not in scores:
+        print('  PENDING - artifact absent, so no verdict is emitted')
+        return
+    q, r, s = qmap[key], rmap[key], scores[key]
+    order = list(s.sort_values(ascending=False).index)
+    fam = [k for k in qmap if k[2] == 'family16']
+    fam_pass = sum(1 for k in fam if qmap[k]['handles'] < alpha)
+    checks = []
+    checks.append(('H1 callbacks ranks 1, handles ranks 2-3',
+                   order[0] == 'callbacks' and r['handles'] in (2, 3),
+                   f'order={">".join(order[:3])} handles_rank={int(r["handles"])}'))
+    checks.append(('H2 callbacks q_BH < 0.05', q['callbacks'] < alpha,
+                   f'q={q["callbacks"]:.4f} delta={s["callbacks"]:+.4f}'))
+    if ('reliance', 'xgboost', 'family16', 42) in scores:
+        rr = compare('histgb:s42', s, 'xgboost:s42', scores[('reliance', 'xgboost', 'family16', 42)])
+        checks.append(('H3 rho vs xgboost in 0.3-0.7 and exact p > 0.05',
+                       0.3 <= rr['rho'] <= 0.7 and rr['p_exact_all_orderings'] > 0.05,
+                       f"rho={rr['rho']:.4f} exact_p={rr['p_exact_all_orderings']:.6f}"))
+    twin = ('utility', 'histgb', 'family16', 42)
+    if twin in scores:
+        rr = compare('utility:s42', scores[twin], 'reliance:s42', s)
+        checks.append(('H4 within-cell utility~reliance rho >= 0.8', rr['rho'] >= 0.8,
+                       f"rho={rr['rho']:.4f} exact_p={rr['p_exact_all_orderings']:.6f}"))
+    checks.append(('H5 handles passes threshold', q['handles'] < alpha,
+                   f'q={q["handles"]:.4f} rank={int(r["handles"])}; '
+                   f'family16 handles tally {fam_pass}/{len(fam)}'))
+    for name, ok, detail in checks:
+        print(f'  {"PASS" if ok else "FAIL"}  {name}  [{detail}]')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--focus', default='handles', help='group whose verdicts are tallied')
@@ -107,11 +156,17 @@ def main():
     args = ap.parse_args()
 
     scores, qmap, rmap = {}, {}, {}
+    absent = []
     for key, (folder, name, dcol, pcol) in INTERVENTIONAL.items():
-        df = load_table(folder, name, key[2], key[1])
+        df = load_table(folder, name, key[2], key[1], allow_missing=key in PENDING)
+        if df is None:
+            absent.append(key)
+            continue
         scores[key] = df[dcol]
         qmap[key] = dict(zip(df.index, bh([float(p) for p in df[pcol]])))
         rmap[key] = df[dcol].rank(ascending=False, method='min').astype(int)
+    for key in absent:
+        print(f'  {label(key)}  PENDING - artifact not on disk, absent from every tally below')
 
     for folder in SHAPLEY_DIRS:
         df = pd.read_csv(os.path.join(ROOT, folder, 'shapley_groups.csv'))
@@ -181,6 +236,8 @@ def main():
         width = pd.Series({g: WIDTH[g] for g in df.index})
         r = compare('width', width, 'null_sd', df[null_col].astype(float))
         print(f'  {label(key)}  rho={r["rho"]:.4f} exact_p={r["p_exact_all_orderings"]:.6f}')
+
+    prereg(scores, qmap, rmap, args.alpha)
 
 
 if __name__ == '__main__':
