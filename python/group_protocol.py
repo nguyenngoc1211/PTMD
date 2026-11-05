@@ -175,8 +175,11 @@ def load_base_frame(path=None):
                  .groupby('key')['family'].nunique())
     conflicting = set(nunique[nunique > 1].index)
     out['__conflict'] = pd.util.hash_pandas_object(out[features], index=False).isin(conflicting)
-    # Benign rows and 430 truncated-id rows cannot be grouped; each becomes its
-    # own singleton unit so a grouped split still covers every row.
+    # Benign rows cannot be grouped, so each becomes its own singleton unit and a
+    # grouped split still covers every row. An earlier note here claimed 430 malware
+    # rows also fail SPECIMEN_PATTERN on a truncated hash prefix; measured over the
+    # 29.298 malware rows of the locked CSV that count is 0, so the only singletons
+    # are the 29.231 benign ones and the unit tally is 2.887 + 29.231 = 32.118.
     singleton = [f'__row_{i}' for i in range(len(out))]
     out['__unit'] = [s if s is None else s for s in out['__specimen']]
     out['__unit'] = out['__unit'].where(out['__unit'].notna(),

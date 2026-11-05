@@ -3,12 +3,15 @@
 Why this module exists
 ----------------------
 ``group_protocol.TaskData.split`` reproduces the verified pipeline: a random
-stratified holdout on rows. The audit (``TECHNICAL_AUDIT.md`` §3) measured that
-split and found 99.8% of test malware specimens also present in train, because
-CIC-MalMem-2022 contributes ~10 memory snapshots per specimen and the random
-split scatters them across both sides. Binary F1 = 1.0000 is therefore partly
-an artefact of near-duplicate leakage, and every leave-one-group-out delta
-measured on that split is noise on a saturated task.
+stratified holdout on rows. The audit measured that split and found 99,77-100 %
+of the test malware specimens also present in train, because CIC-MalMem-2022
+contributes a median of 10 memory snapshots per specimen and the random split
+scatters them across both sides. The leakage is at unit level, but its cost is
+not equal across tasks: on XGBoost over three seeds, binary F1 moves by 0,00017
+between the random and the source-aware split, while family16 macro-F1 moves by
+0,0842 (``results/splits/split_impact_summary.csv``). A leave-one-group-out
+delta measured on the random split therefore sits on a task that the split
+itself made easier, which is why every phase reads the locked files instead.
 
 This module splits on the *source unit* instead of the row:
 
@@ -18,10 +21,20 @@ This module splits on the *source unit* instead of the row:
 
 Stratification is applied to unit-level strata. A unit whose rows carry more
 than one label would be ambiguous to stratify, so it becomes its own ``mixed``
-stratum rather than being assigned to one class. In this dataset 19 units are
-mixed (the same 19 specimens that produce the family-label conflicts) and 0
-units straddle the binary label, so the binary task is exactly stratified and
-the multiclass tasks deviate by at most those 19 units.
+stratum rather than being assigned to one class. In this dataset 0 units
+straddle the binary label, so the binary task is exactly stratified, while
+type4 and family16 each carry 19 mixed units (366 rows).
+
+Those 19 mixed units are NOT the 19 rows flagged by ``load_base_frame`` as
+``__conflict``, and the two counts matching is a coincidence. ``__conflict``
+marks one exact *feature vector* whose raw rows carry several family labels;
+the 19 flagged vectors belong to 17 specimens. A mixed *unit* is one specimen
+id whose rows carry several labels. The two sets are disjoint, and each mixed
+unit is an identifier collision rather than a drifting label: all 19 are among
+the 111 ids holding more than 10 snapshots, and each resolves to exactly 2
+families and 2 types, i.e. two samples sharing one specimen hash. Both rules
+drop or isolate their own rows, so neither is silently relabelled, but a
+comment here once asserted they were the same 19 specimens. They are not.
 
 Locked splits
 -------------
