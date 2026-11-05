@@ -78,7 +78,9 @@ SHAPLEY_DIRS = ['importance_shapley', 'importance_shapley_s43_44', 'importance_s
 # Cells whose artifact is still being written. A missing file is expected here and only
 # here, so a typo in the path of a finished cell still raises instead of quietly shrinking
 # every tally. Empty this set once the run lands and the tallies become final.
-PENDING = {('reliance', 'histgb', 'family16', 42)}
+# Emptied 04/11: importance_v3_histgb landed rc=0 at 10:54:31 with 1809 rows, 201 blocks
+# per group, no duplicate keys and no NaN delta.
+PENDING = set()
 
 WIDTH = {'modules': 1, 'dlllist': 2, 'callbacks': 3, 'malfind': 4, 'pslist': 5,
          'ldrmodules': 6, 'svcscan': 7, 'handles': 13, 'psxview': 14}
